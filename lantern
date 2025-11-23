@@ -26,14 +26,58 @@ echo -e "${yellow}[*]${end} ${purple}Using output directory:${end} ${blue}$OUTDI
 echo -e "\n${yellow}[*]${end} ${purple}Scanning ports on${end} ${blue}$target${end}${purple}...${end}\n"
 
 ALLPORTS="$REPORTDIR/allPorts"
+PART1="$REPORTDIR/allPorts.p1"
+PART2="$REPORTDIR/allPorts.p2"
+PART3="$REPORTDIR/allPorts.p3"
 
+# Clean old artifacts if they exist
+rm -f "$ALLPORTS" "$PART1" "$PART2" "$PART3"
+
+# Run three concurrent range scans to speed up discovery.
+# Combined, these cover 1–65535 without overlap:
+#   1–22000, 22001–44000, 44001–65535
 sudo /usr/bin/nmap \
-  -p- --open -sS -n -Pn \
+  -p1-22000 --open -sS -n -Pn \
   --min-rate 2500 \
   --max-retries 1 \
   -T3 \
-  -oG "$ALLPORTS" \
-  "$target" >/dev/null 2>&1
+  -oG "$PART1" \
+  "$target" >/dev/null 2>&1 &
+
+pid1=$!
+
+sudo /usr/bin/nmap \
+  -p22001-44000 --open -sS -n -Pn \
+  --min-rate 2500 \
+  --max-retries 1 \
+  -T3 \
+  -oG "$PART2" \
+  "$target" >/dev/null 2>&1 &
+
+pid2=$!
+
+sudo /usr/bin/nmap \
+  -p44001-65535 --open -sS -n -Pn \
+  --min-rate 2500 \
+  --max-retries 1 \
+  -T3 \
+  -oG "$PART3" \
+  "$target" >/dev/null 2>&1 &
+
+pid3=$!
+
+# Wait for all three discovery scans to finish
+wait "$pid1" "$pid2" "$pid3" 2>/dev/null || true
+
+# Merge into a single greppable file so the rest of the script
+# can continue to treat $ALLPORTS exactly as before.
+: > "$ALLPORTS"
+[ -f "$PART1" ] && cat "$PART1" >> "$ALLPORTS"
+[ -f "$PART2" ] && cat "$PART2" >> "$ALLPORTS"
+[ -f "$PART3" ] && cat "$PART3" >> "$ALLPORTS"
+
+# Optionally clean up the parts
+rm -f "$PART1" "$PART2" "$PART3"
 
 # If greppable file exists, extract ports reliably and print them once
 if [ -f "$ALLPORTS" ]; then
@@ -64,7 +108,7 @@ echo -e "\n${yellow}[*]${end} ${purple}Extracting information...${end}\n"
 echo -e "\t${yellow}[*]${end} ${purple}IP Address:${end} ${blue}$target${end}"
 echo -e "\t${yellow}[*]${end} ${purple}Open ports:${end} ${blue}${ports:-<none>}${end}\n"
 
-# --- targeted scan (only if we have ports) ---
+# --- targeted scan (only if we have ports, runs synchronously) ---
 TARGETED_XML="$REPORTDIR/targetedXML"
 
 if [ -n "$ports" ]; then
@@ -75,7 +119,7 @@ else
   echo -e "${yellow}[!]${end} ${purple}No open ports detected; skipping targeted scan.${end}"
 fi
 
-# --- service dispatch (HTTP and future services) ---
+# --- service dispatch (SSH / HTTP / HTTP-CMS, etc.) ---
 # Pass OUTDIR, target, targeted XML, and port list so dispatcher has context
 "$ROOTDIR/scripts/dispatch" "$OUTDIR" "$target" "$TARGETED_XML" "$ports" || true
 # --- end dispatcher ---

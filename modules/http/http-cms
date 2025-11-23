@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
+  echo "[!] http-cms: Usage: http-cms OUTDIR TARGET" >&2
+  exit 2
+fi
+
+HMOD="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
+ROOTDIR="$(cd "$HMOD/../.." >/dev/null 2>&1 && pwd)"
+MODDIR="$ROOTDIR/modules"
+
+# Colors if available
+if [ -f "$ROOTDIR/lib/colors" ]; then
+  # shellcheck source=/dev/null
+  . "$ROOTDIR/lib/colors"
+else
+  yellow=""; purple=""; blue=""; end=""
+fi
+
+VERIFIED_FILE="$OUTDIR/http/verified-ports.txt"
+if [ ! -s "$VERIFIED_FILE" ]; then
+  echo -e "${yellow}[*]${end} ${purple}http-cms: no verified HTTP ports file; skipping CMS scans.${end}"
+  exit 0
+fi
+
+ports="$(cat "$VERIFIED_FILE" | sed 's/[^0-9]//g' | sed '/^$/d' | sort -n -u)"
+[ -z "$ports" ] && { echo -e "${yellow}[*]${end} ${purple}http-cms: empty verified ports list; skipping.${end}"; exit 0; }
+
+echo -e "${yellow}[*]${end} ${purple}Starting CMS scans on HTTP ports:${end} ${blue}$ports${end}"
+
+for p in $ports; do
+  echo -e "${yellow}[*]${end} ${purple}Running cmscans for${end} ${blue}${TARGET}:${p}${end}"
+  "$MODDIR/http/cmscans" "$OUTDIR" "$TARGET" "$p" || true
+done
+
+echo -e "${yellow}[*]${end} ${purple}CMS scans complete.${end}"
+
+exit 0

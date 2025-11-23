@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTDIR="${1:-}"
+
+if [ -z "$OUTDIR" ] || [ ! -d "$OUTDIR" ]; then
+  echo "[!] treasure: Usage: treasure OUTDIR" >&2
+  exit 2
+fi
+
+TREASURE_DIR="$OUTDIR/treasure"
+mkdir -p "$TREASURE_DIR"
+
+tmp_emails="$(mktemp)"
+tmp_domains="$(mktemp)"
+tmp_cves="$(mktemp)"
+tmp_users="$(mktemp)"
+
+# --- Collect emails ---
+find "$OUTDIR/http" -type f -name emails.txt -exec cat {} + 2>/dev/null >> "$tmp_emails"
+
+# --- Collect domains ---
+find "$OUTDIR/http" -type f -name hosts_from_body.txt -exec cat {} + 2>/dev/null >> "$tmp_domains"
+
+# --- Collect CVEs ---
+grep -RhoE 'CVE-[0-9]{4}-[0-9]+' "$OUTDIR" 2>/dev/null >> "$tmp_cves" || true
+
+# --- Collect users from WordPress ---
+grep -RhoE '^User: .+' "$OUTDIR/http" 2>/dev/null \
+  | sed 's/^User: //' >> "$tmp_users" || true
+
+# --- Write final sorted artifacts ---
+sort -u "$tmp_emails"   > "$TREASURE_DIR/emails.txt"   || true
+sort -u "$tmp_domains"  > "$TREASURE_DIR/domains.txt"  || true
+sort -u "$tmp_cves"     > "$TREASURE_DIR/cves.txt"     || true
+sort -u "$tmp_users"    > "$TREASURE_DIR/users.txt"    || true
+
+rm -f "$tmp_emails" "$tmp_domains" "$tmp_cves" "$tmp_users"
+
+# --- HTML fragment ---
+FRAGDIR="$OUTDIR/report/fragments"
+mkdir -p "$FRAGDIR"
+FRAG="$FRAGDIR/25-treasure.html"
+
+{
+  echo '<h3>Treasure</h3>'
+  echo '<div class="lantern-port">'
+  echo '<ul>'
+  for item in emails domains cves users; do
+    f="$TREASURE_DIR/$item.txt"
+    if [ -s "$f" ]; then
+      count=$(wc -l < "$f")
+      echo "<li><strong>${item} (${count})</strong> — <a href=\"../treasure/${item}.txt\">${item}.txt</a></li>"
+    fi
+  done
+  echo '</ul>'
+  echo '</div>'
+} > "$FRAG"
+
+echo "[*] Treasure fragment generated."

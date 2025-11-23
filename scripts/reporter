@@ -109,11 +109,11 @@ build_ssh_fragment() {
 
     esc_software="$(printf '%s' "$software" | html_escape)"
 
-    # Grab critical lines from ssh-audit.txt (FATAL or CVE-)
-    local critical
-    critical=""
+    # Grab notable lines from ssh-audit.txt (FATAL or CVE-)
+    local notable
+    notable=""
     if [ -s "$portdir/ssh-audit.txt" ]; then
-      critical="$(grep -E 'FATAL|CVE-' "$portdir/ssh-audit.txt" 2>/dev/null | head -n 8 || true)"
+      notable="$(grep -E 'FATAL|CVE-' "$portdir/ssh-audit.txt" 2>/dev/null | head -n 8 || true)"
     fi
 
     # Build basic links to raw SSH artifacts
@@ -133,10 +133,10 @@ build_ssh_fragment() {
       echo "  </div>"
     } >> "$frag"
 
-    # Inline critical findings (if any) directly above links and details
-    if [ -n "$critical" ]; then
-      echo "  <div class=\"lantern-meta lantern-ssh-critical\"><strong>Critical SSH findings:</strong><br><pre>" >> "$frag"
-      printf '%s\n' "$critical" | html_escape >> "$frag"
+    # Inline notable findings (if any) directly above links and details
+    if [ -n "$notable" ]; then
+      echo "  <div class=\"lantern-meta lantern-ssh-notable\"><strong>Notable SSH findings:</strong><br><pre>" >> "$frag"
+      printf '%s\n' "$notable" | html_escape >> "$frag"
       echo "  </pre></div>" >> "$frag"
     fi
 
@@ -339,12 +339,12 @@ cat > "$TMP" <<'HEAD'
 #lantern-report code{background:#f6f8fa;padding:0 .3rem;border-radius:6px}
 #lantern-report .lantern-files a{text-decoration:none}
 
-/* Critical SSH block */
-#lantern-report .lantern-ssh-critical{
+/* Notable SSH block */
+#lantern-report .lantern-ssh-notable{
   color:#b91c1c;
   font-weight:600;
 }
-#lantern-report .lantern-ssh-critical pre{
+#lantern-report .lantern-ssh-notable pre{
   margin:.25rem 0 0;
   padding:.25rem .5rem;
   background:#fef2f2;

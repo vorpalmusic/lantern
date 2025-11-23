@@ -3,7 +3,7 @@ set -euo pipefail
 
 OUTDIR="${1:-}"
 TARGET="${2:-}"
-TARGETED_XML="${3:-}"   # nmap -sCV XML
+TARGETED_XML="${3:-}"   # nmap -sCV XML (may be empty/in-progress)
 PORTS="${4:-}"          # comma-separated list from allPorts
 
 if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
@@ -12,57 +12,130 @@ if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
 fi
 
 # Resolve ROOTDIR based on this script being in $ROOTDIR/scripts
-rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/.. >/dev/null 2>&1 && pwd)"
-ROOTDIR="$rootdir"
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/.. >/dev/null 2>&1 && pwd)"
 
-HTTP_MASTER="$ROOTDIR/modules/http/http-master"
+# Colors if available
+if [ -f "$ROOTDIR/lib/colors" ]; then
+  # shellcheck source=/dev/null
+  . "$ROOTDIR/lib/colors"
+else
+  yellow=""; purple=""; blue=""; end=""
+fi
+
 SSH_MASTER="$ROOTDIR/modules/ssh/ssh-master"
+HTTP_MASTER="$ROOTDIR/modules/http/http-master"
+HTTP_CMS_MASTER="$ROOTDIR/modules/http/http-cms"
+TREASURE="$ROOTDIR/scripts/treasure"
 
 has_ssh=false
 has_http=false
 
-# --- Prefer XML-based service detection ---
-if [ -n "${TARGETED_XML:-}" ] && [ -s "${TARGETED_XML:-}" ]; then
-  if grep -qi 'service name="ssh"' "$TARGETED_XML"; then
-    has_ssh=true
-  fi
-  if grep -qi 'service name="http"' "$TARGETED_XML"; then
-    has_http=true
-  fi
-  if grep -qi 'service name="https"' "$TARGETED_XML"; then
-    has_http=true
-  fi
-fi
-
-# --- Fallback: infer from ports if XML missing/empty ---
+# --- Service detection from ports (fast, doesn't depend on XML) ---
 if [ -n "${PORTS:-}" ]; then
   IFS=',' read -r -a arr <<< "$PORTS"
   for p in "${arr[@]}"; do
     p="${p//[^0-9]/}"
     [ -z "$p" ] && continue
 
-    if [ "$p" = "22" ] && [ "$has_ssh" = false ]; then
-      has_ssh=true
-    fi
-
+    [ "$p" = "22" ] && has_ssh=true
     case "$p" in
-      80|443|8080|8443)
-        if [ "$has_http" = false ]; then
-          has_http=true
-        fi
-        ;;
+      80|443|8080|8443) has_http=true ;;
     esac
   done
 fi
 
-# --- Run modules in port/service order: SSH first, then HTTP ---
-
-# SSH (only if detected and module exists)
-if [ -x "$SSH_MASTER" ] && [ "$has_ssh" = true ]; then
-  "$SSH_MASTER" "$OUTDIR" "$TARGET" "$TARGETED_XML" "$PORTS" || echo "[!] ssh-master failed" >&2
+# Optional refinement from XML, if it is already present and non-empty
+if [ -n "${TARGETED_XML:-}" ] && [ -s "$TARGETED_XML" ]; then
+  if grep -qi 'service name="ssh"' "$TARGETED_XML";   then has_ssh=true;  fi
+  if grep -qi 'service name="http"' "$TARGETED_XML";  then has_http=true; fi
+  if grep -qi 'service name="https"' "$TARGETED_XML"; then has_http=true; fi
 fi
 
-# HTTP (only if detected and module exists)
-if [ -x "$HTTP_MASTER" ] && [ "$has_http" = true ]; then
-  "$HTTP_MASTER" "$OUTDIR" "$TARGET" || echo "[!] http-master failed" >&2
+LOGDIR="$OUTDIR/logs"
+mkdir -p "$LOGDIR"
+
+ssh_pid=""
+http_pid=""
+http_cms_pid=""
+
+echo -e "${yellow}[*]${end} ${purple}Launching service modules in parallel...${end}"
+
+# --- SSH module (runs fully parallel, printed by a polling helper) ---
+if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
+  echo -e "${yellow}[*]${end} ${purple}Starting SSH module...${end}"
+  "$SSH_MASTER" "$OUTDIR" "$TARGET" "$TARGETED_XML" "$PORTS" >"$LOGDIR/ssh.log" 2>&1 &
+  ssh_pid=$!
+
+  # Printer helper: poll until ssh_pid is gone, then print its log
+  (
+    # Wait until the SSH process is no longer running
+    while kill -0 "$ssh_pid" 2>/dev/null; do
+      sleep 0.3
+    done
+
+    if [ -s "$LOGDIR/ssh.log" ]; then
+      echo -e "\n${yellow}[*]${end} ${purple}SSH module results:${end}"
+      cat "$LOGDIR/ssh.log"
+    fi
+  ) &
+
+elif [ "$has_ssh" = true ] && [ ! -x "$SSH_MASTER" ]; then
+  echo -e "${yellow}[!]${end} ${purple}SSH detected but ssh-master not found at${end} ${blue}$SSH_MASTER${end}"
 fi
+
+# --- HTTP core module (detect/collect/enrich/add-hosts) ---
+if [ "$has_http" = true ] && [ -x "$HTTP_MASTER" ]; then
+  echo -e "${yellow}[*]${end} ${purple}Starting HTTP module...${end}"
+  "$HTTP_MASTER" "$OUTDIR" "$TARGET" >"$LOGDIR/http.log" 2>&1 &
+  http_pid=$!
+elif [ "$has_http" = true ] && [ ! -x "$HTTP_MASTER" ]; then
+  echo -e "${yellow}[!]${end} ${purple}HTTP detected but http-master not found at${end} ${blue}$HTTP_MASTER${end}"
+fi
+
+if [ -z "$ssh_pid" ] && [ -z "$http_pid" ]; then
+  echo -e "${yellow}[!]${end} ${purple}No service modules to run.${end}"
+  exit 0
+fi
+
+echo -e "${yellow}[*]${end} ${purple}Waiting for HTTP core to complete (SSH continues in parallel)...${end}"
+
+# --- Wait for HTTP core (only) and then start HTTP CMS ---
+if [ -n "$http_pid" ]; then
+  wait "$http_pid" || true
+  if [ -s "$LOGDIR/http.log" ]; then
+    echo -e "\n${yellow}[*]${end} ${purple}HTTP module results:${end}"
+    cat "$LOGDIR/http.log"
+  fi
+
+  # Now that http-master is done, verified-ports.txt exists if there are HTTP ports.
+  if [ "$has_http" = true ] && [ -x "$HTTP_CMS_MASTER" ]; then
+    echo -e "${yellow}[*]${end} ${purple}Starting HTTP CMS module...${end}"
+    "$HTTP_CMS_MASTER" "$OUTDIR" "$TARGET" >"$LOGDIR/http-cms.log" 2>&1 &
+    http_cms_pid=$!
+  fi
+fi
+
+echo -e "${yellow}[*]${end} ${purple}Waiting for remaining modules (SSH / HTTP-CMS) to complete...${end}"
+
+# --- Wait for HTTP CMS, print its block ---
+if [ -n "$http_cms_pid" ]; then
+  wait "$http_cms_pid" || true
+  if [ -s "$LOGDIR/http-cms.log" ]; then
+    echo -e "\n${yellow}[*]${end} ${purple}HTTP-CMS module results:${end}"
+    cat "$LOGDIR/http-cms.log"
+  fi
+fi
+
+# --- Ensure SSH has actually finished before treasure (reap zombie) ---
+if [ -n "$ssh_pid" ]; then
+  wait "$ssh_pid" 2>/dev/null || true
+fi
+
+# --- Run Treasure aggregation (cheap, after all modules) ---
+if [ -x "$TREASURE" ]; then
+  echo -e "${yellow}[*]${end} ${purple}Aggregating treasure...${end}"
+  "$TREASURE" "$OUTDIR"
+  echo -e "${yellow}[*]${end} ${purple}Treasure complete.${end}"
+fi
+
+exit 0

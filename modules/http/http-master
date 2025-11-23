@@ -9,50 +9,57 @@ if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
   exit 2
 fi
 
-if [ ! -d "$OUTDIR" ]; then
-  echo "[!] http-master: OUTDIR '$OUTDIR' does not exist" >&2
-  exit 2
-fi
+# Resolve ROOTDIR from modules/http/http-master
+HMOD="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
+ROOTDIR="$(cd "$HMOD/../.." >/dev/null 2>&1 && pwd)"
+MODDIR="$ROOTDIR/modules"
+LISTDIR="$ROOTDIR/lists"
 
-# Figure out where we are: $ROOTDIR/modules/http/http-master
-HTTPMOD="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
-ROOTDIR="$(cd "$HTTPMOD/../.." >/dev/null 2>&1 && pwd)"
-REPORTDIR="$OUTDIR/report"
-
-# Load colors for pretty output
+# Colors if available
 if [ -f "$ROOTDIR/lib/colors" ]; then
   # shellcheck source=/dev/null
   . "$ROOTDIR/lib/colors"
 else
-  # fall back to no colors
   yellow=""; purple=""; blue=""; end=""
 fi
 
-### http-detect
-eval "$("$HTTPMOD/http-detect" "$OUTDIR" "$TARGET")"
+mkdir -p "$OUTDIR/http"
+
+# --- HTTP detect (reuses existing helper) ---
+eval "$("$MODDIR/http/http-detect" "$OUTDIR" "$TARGET")"
+
 echo -e "${yellow}[*]${end} ${purple}HTTP candidates:${end} ${blue}${HTTP_CAND:-<none>}${end}"
 echo -e "${yellow}[*]${end} ${purple}Verified HTTP ports:${end} ${blue}${HTTP_VERIFIED:-<none>}${end}"
 
-### http-collect
+# Persist verified ports for downstream modules (e.g. http-cms)
+VERIFIED_FILE="$OUTDIR/http/verified-ports.txt"
+: > "$VERIFIED_FILE"
 if [ -n "${HTTP_VERIFIED:-}" ]; then
-  for p in $(echo "${HTTP_VERIFIED}" | tr ',' ' '); do
+  echo "$HTTP_VERIFIED" | tr ',' '\n' | sed 's/[^0-9]//g' | sed '/^$/d' | sort -n -u > "$VERIFIED_FILE"
+fi
+
+# --- HTTP collect per verified port ---
+if [ -n "${HTTP_VERIFIED:-}" ]; then
+  for p in $(echo "$HTTP_VERIFIED" | tr ',' ' '); do
     p="${p//[^0-9]/}"
     [ -z "$p" ] && continue
-
-    "$HTTPMOD/http-collect" "$OUTDIR" "$TARGET" "$p" >/dev/null 2>&1 || true
+    "$MODDIR/http/http-collect" "$OUTDIR" "$TARGET" "$p" >/dev/null 2>&1 || true
   done
 fi
-# --- end collect ---
 
-# --- show emails we scraped from the HTTP bodies (if any) ---
+# --- Emails summary ---
 emails_tmp="$OUTDIR/.emails.tmp"
 : > "$emails_tmp"
+
 if [ -n "${HTTP_VERIFIED:-}" ]; then
-  for p in $(echo "${HTTP_VERIFIED}" | tr ',' ' '); do
+  for p in $(echo "$HTTP_VERIFIED" | tr ',' ' '); do
+    p="${p//[^0-9]/}"
+    [ -z "$p" ] && continue
     f="$OUTDIR/http/$p/emails.txt"
     [ -s "$f" ] && cat "$f" >> "$emails_tmp"
   done
 fi
+
 if [ -s "$emails_tmp" ]; then
   emails_sorted="$(sort -u "$emails_tmp")"
   echo -e "${yellow}[*]${end} ${purple}Emails found in page content:${end}"
@@ -61,32 +68,22 @@ if [ -s "$emails_tmp" ]; then
   done <<< "$emails_sorted"
 fi
 rm -f "$emails_tmp"
-# --- end emails summary ---
 
-# assume HTTP_CAND contains e.g. s3.thetoppers.htb and HTTP_VERIFIED contains ports
+# --- Domains enrichment ---
 target_hint="${HTTP_CAND:-$TARGET}"
-found_hosts="$("$HTTPMOD/enrich" "$OUTDIR" "$target_hint" --max 200)"
+found_hosts="$("$MODDIR/http/enrich" "$OUTDIR" "$target_hint" --max 200)"
 echo -e "${yellow}[*]${end} ${purple}Domains found:${end}"
 echo "$found_hosts" | sed '/^$/d' | while IFS= read -r h; do
   echo -e "   ${blue}$h${end}"
 done
 
-# --- Add /etc/hosts entries ONCE (denylist-aware) ---
-DENYLIST="$ROOTDIR/lists/deny-domains"
-added="$(sudo bash "$ROOTDIR/scripts/add-hosts" "$OUTDIR" "$TARGET" "${HTTP_VERIFIED:-}" --deny-file "$DENYLIST")"
+# --- /etc/hosts additions (denylist-aware) ---
+added="$(sudo bash "$ROOTDIR/scripts/add-hosts" "$OUTDIR" "$TARGET" "${HTTP_VERIFIED:-}" --deny-file "$LISTDIR/deny-domains" 2>/dev/null || true)"
 if [ -n "$added" ]; then
   echo -e "${yellow}[*]${end} ${purple}Hosts added to /etc/hosts:${end}"
   echo "$added"
 else
-  echo -e "${yellow}[*]${end} ${purple}No new /etc/hosts entries needed.${end} \n"
+  echo -e "${yellow}[*]${end} ${purple}No new /etc/hosts entries needed.${end}"
 fi
 
-# --- CMS scans (run after enrich and hosts setup) ---
-if [ -n "${HTTP_VERIFIED:-}" ]; then
-  for p in $(echo "${HTTP_VERIFIED}" | tr ',' ' '); do
-    p="${p//[^0-9]/}"
-    [ -z "$p" ] && continue
-    "$HTTPMOD/cmscans" "$OUTDIR" "$TARGET" "$p" || true
-  done
-fi
-# --- end CMS scans ---
+exit 0
