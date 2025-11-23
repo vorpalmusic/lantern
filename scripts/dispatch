@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+TARGETED_XML="${3:-}"   # nmap -sCV XML
+PORTS="${4:-}"          # comma-separated list from allPorts
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
+  echo "[!] dispatch: Usage: dispatch OUTDIR TARGET [TARGETED_XML] [PORTS]" >&2
+  exit 2
+fi
+
+# Resolve ROOTDIR based on this script being in $ROOTDIR/scripts
+rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/.. >/dev/null 2>&1 && pwd)"
+ROOTDIR="$rootdir"
+
+HTTP_MASTER="$ROOTDIR/modules/http/http-master"
+SSH_MASTER="$ROOTDIR/modules/ssh/ssh-master"
+
+has_ssh=false
+has_http=false
+
+# --- Prefer XML-based service detection ---
+if [ -n "${TARGETED_XML:-}" ] && [ -s "${TARGETED_XML:-}" ]; then
+  if grep -qi 'service name="ssh"' "$TARGETED_XML"; then
+    has_ssh=true
+  fi
+  if grep -qi 'service name="http"' "$TARGETED_XML"; then
+    has_http=true
+  fi
+  if grep -qi 'service name="https"' "$TARGETED_XML"; then
+    has_http=true
+  fi
+fi
+
+# --- Fallback: infer from ports if XML missing/empty ---
+if [ -n "${PORTS:-}" ]; then
+  IFS=',' read -r -a arr <<< "$PORTS"
+  for p in "${arr[@]}"; do
+    p="${p//[^0-9]/}"
+    [ -z "$p" ] && continue
+
+    if [ "$p" = "22" ] && [ "$has_ssh" = false ]; then
+      has_ssh=true
+    fi
+
+    case "$p" in
+      80|443|8080|8443)
+        if [ "$has_http" = false ]; then
+          has_http=true
+        fi
+        ;;
+    esac
+  done
+fi
+
+# --- Run modules in port/service order: SSH first, then HTTP ---
+
+# SSH (only if detected and module exists)
+if [ -x "$SSH_MASTER" ] && [ "$has_ssh" = true ]; then
+  "$SSH_MASTER" "$OUTDIR" "$TARGET" "$TARGETED_XML" "$PORTS" || echo "[!] ssh-master failed" >&2
+fi
+
+# HTTP (only if detected and module exists)
+if [ -x "$HTTP_MASTER" ] && [ "$has_http" = true ]; then
+  "$HTTP_MASTER" "$OUTDIR" "$TARGET" || echo "[!] http-master failed" >&2
+fi

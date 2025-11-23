@@ -75,65 +75,10 @@ else
   echo -e "${yellow}[!]${end} ${purple}No open ports detected; skipping targeted scan.${end}"
 fi
 
-### http-detect
-eval "$("$MODDIR/http/http-detect" "$OUTDIR" "$target")"
-echo -e "${yellow}[*]${end} ${purple}HTTP candidates:${end} ${blue}${HTTP_CAND:-<none>}${end}"
-echo -e "${yellow}[*]${end} ${purple}Verified HTTP ports:${end} ${blue}${HTTP_VERIFIED:-<none>}${end}"
-
-### http-collect
-if [ -n "${HTTP_VERIFIED:-}" ]; then
-  for p in $(echo "${HTTP_VERIFIED}" | tr ',' ' '); do
-    p="${p//[^0-9]/}"; [ -z "$p" ] && continue
-
-    "$MODDIR/http/http-collect" "$OUTDIR" "$target" "$p" >/dev/null 2>&1 || true
-  done
-fi
-# --- end ---
-
-# --- show emails we scraped from the HTTP bodies (if any) ---
-emails_tmp="$OUTDIR/.emails.tmp"
-: > "$emails_tmp"
-if [ -n "${HTTP_VERIFIED:-}" ]; then
-  for p in $(echo "${HTTP_VERIFIED}" | tr ',' ' '); do
-    f="$OUTDIR/http/$p/emails.txt"
-    [ -s "$f" ] && cat "$f" >> "$emails_tmp"
-  done
-fi
-if [ -s "$emails_tmp" ]; then
-  emails_sorted="$(sort -u "$emails_tmp")"
-  echo -e "${yellow}[*]${end} ${purple}Emails found in page content:${end}"
-  while IFS= read -r e; do
-    echo -e "   ${blue}${e}${end}"
-  done <<< "$emails_sorted"
-fi
-rm -f "$emails_tmp"
-# --- end emails summary ---
-
-# assume HTTP_CAND contains e.g. s3.thetoppers.htb and HTTP_VERIFIED contains ports
-target_hint="${HTTP_CAND:-$target}"
-found_hosts="$("$MODDIR/http/enrich" "$OUTDIR" "$target_hint" --max 200)"
-echo -e "${yellow}[*]${end} ${purple}Domains found:${end}"
-echo "$found_hosts" | sed '/^$/d' | while IFS= read -r h; do
-  echo -e "   ${blue}$h${end}"
-done
-
-# --- Add /etc/hosts entries ONCE (denylist-aware) ---
-added="$(sudo bash "$ROOTDIR/scripts/add-hosts" "$OUTDIR" "$target" "${HTTP_VERIFIED:-}" --deny-file "$LISTDIR/deny-domains")"
-if [ -n "$added" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Hosts added to /etc/hosts:${end}"
-  echo "$added"
-else
-  echo -e "${yellow}[*]${end} ${purple}No new /etc/hosts entries needed.${end} \n"
-fi
-
-# --- CMS scans (run after enrich and hosts setup) ---
-if [ -n "${HTTP_VERIFIED:-}" ]; then
-  for p in $(echo "${HTTP_VERIFIED}" | tr ',' ' '); do
-    p="${p//[^0-9]/}"; [ -z "$p" ] && continue
-    "$MODDIR/http/cmscans" "$OUTDIR" "$target" "$p" || true
-  done
-fi
-# --- end CMS scans ---
+# --- service dispatch (HTTP and future services) ---
+# Pass OUTDIR, target, targeted XML, and port list so dispatcher has context
+"$ROOTDIR/scripts/dispatch" "$OUTDIR" "$target" "$TARGETED_XML" "$ports" || true
+# --- end dispatcher ---
 
 # ... generate HTML deep dive
 # Robust stylesheet resolution: honor env if provided, else use common paths

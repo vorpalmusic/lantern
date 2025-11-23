@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+TARGETED_XML="${3:-}"
+PORTS="${4:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
+  echo "[!] ssh-master: Usage: ssh-master OUTDIR TARGET [TARGETED_XML] [PORTS]" >&2
+  exit 2
+fi
+
+if [ ! -d "$OUTDIR" ]; then
+  echo "[!] ssh-master: OUTDIR '$OUTDIR' does not exist" >&2
+  exit 2
+fi
+
+# Figure out where we are: $ROOTDIR/modules/ssh/ssh-master
+SSHMOD="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
+ROOTDIR="$(cd "$SSHMOD/../.." >/dev/null 2>&1 && pwd)"
+
+# Load colors if available
+if [ -f "$ROOTDIR/lib/colors" ]; then
+  # shellcheck source=/dev/null
+  . "$ROOTDIR/lib/colors"
+else
+  yellow=""; purple=""; blue=""; red=""; end=""
+fi
+
+# --- helper: find SSH ports from XML ---
+find_ssh_ports_from_xml() {
+  local xml="$1"
+  [ -s "$xml" ] || return 0
+
+  # Look for <service name="ssh"> and grab the portid from the preceding port tag
+  grep -i -B1 'service name="ssh"' "$xml" 2>/dev/null \
+    | grep 'port protocol="tcp"' \
+    | sed -E 's/.*portid="([0-9]+)".*/\1/' \
+    | sort -n -u
+}
+
+# --- compute SSH ports ---
+ssh_ports=""
+
+# 1) Prefer XML-based detection (non-standard ports included)
+if [ -n "${TARGETED_XML:-}" ] && [ -s "${TARGETED_XML:-}" ]; then
+  ssh_ports="$(find_ssh_ports_from_xml "$TARGETED_XML" || true)"
+fi
+
+# 2) Fallback: if port 22 is open in the generic port list, assume SSH there
+if [ -z "$ssh_ports" ] && [ -n "${PORTS:-}" ]; then
+  IFS=',' read -r -a arr <<< "$PORTS"
+  for p in "${arr[@]}"; do
+    p="${p//[^0-9]/}"
+    [ "$p" = "22" ] && ssh_ports="22"
+  done
+fi
+
+# 3) If still nothing, bail quietly
+if [ -z "$ssh_ports" ]; then
+  echo -e "${yellow}[*]${end} ${purple}SSH:${end} ${purple}no SSH services detected, skipping.${end}"
+  exit 0
+fi
+
+echo -e "${yellow}[*]${end} ${purple}SSH ports detected:${end} ${blue}${ssh_ports}${end}"
+
+# --- helper: parse banner line from ssh-audit output ---
+extract_software_line() {
+  local file="$1"
+  local line
+  line="$(grep -m1 -Ei 'software:|^SSH-[0-9]+\.' "$file" 2>/dev/null || true)"
+  echo "${line:-unknown}"
+}
+
+# --- main per-port loop ---
+for port in $ssh_ports; do
+  port="${port//[^0-9]/}"
+  [ -z "$port" ] && continue
+
+  PORTDIR="$OUTDIR/ssh/$port"
+  mkdir -p "$PORTDIR"
+
+  echo -e "${yellow}[*]${end} ${purple}Enumerating SSH on${end} ${blue}${TARGET}:${port}${end}"
+
+  # 1) ssh-audit (if available)
+  if command -v ssh-audit >/dev/null 2>&1; then
+    ssh-audit -n -p "$port" "$TARGET" > "$PORTDIR/ssh-audit.txt" 2>&1 || true
+  else
+    echo "[!] ssh-audit not installed; apt install ssh-audit" > "$PORTDIR/ssh-audit.txt"
+  fi
+
+  # 2) nmap ssh scripts (ssh2-enum-algos, ssh-hostkey)
+  if command -v nmap >/dev/null 2>&1; then
+    nmap -p"$port" --script ssh2-enum-algos,ssh-hostkey -Pn "$TARGET" \
+      -oN "$PORTDIR/nmap_ssh.txt" >/dev/null 2>&1 || true
+  else
+    echo "[!] nmap not found; cannot run ssh2-enum-algos/ssh-hostkey" > "$PORTDIR/nmap_ssh.txt"
+  fi
+
+  # 3) Build summary
+  software="unknown"
+  if [ -s "$PORTDIR/ssh-audit.txt" ]; then
+    software="$(extract_software_line "$PORTDIR/ssh-audit.txt")"
+  fi
+
+  # Pull host key types from nmap; kept for report, not printed inline
+  key_types=""
+  if [ -s "$PORTDIR/nmap_ssh.txt" ]; then
+    key_types="$(grep -Ei 'ssh-hostkey' -A5 "$PORTDIR/nmap_ssh.txt" 2>/dev/null \
+      | grep -E '\(RSA\)|\(ECDSA\)|\(ED25519\)|\(DSA\)' \
+      | sed -E 's/.*\((RSA|ECDSA|ED25519|DSA)\).*/\1/' \
+      | sort -u | xargs || true)"
+  fi
+
+  # Extract notable lines from ssh-audit (FATAL / CVE-)
+  notable_lines=""
+  if [ -s "$PORTDIR/ssh-audit.txt" ]; then
+    notable_lines="$(grep -E 'FATAL|CVE-' "$PORTDIR/ssh-audit.txt" 2>/dev/null || true)"
+  fi
+
+  # Write summary.txt (including notable section if present)
+  {
+    echo "SSH summary for ${TARGET}:${port}"
+    echo "------------------------------"
+    echo "Software / banner: ${software}"
+    echo "Host key types: ${key_types:-unknown}"
+    echo
+    echo "Artifacts:"
+    echo "  ssh-audit.txt  - raw ssh-audit output (algos, ciphers, MACs, warnings)"
+    echo "  nmap_ssh.txt   - nmap ssh2-enum-algos, ssh-hostkey results"
+    if [ -n "$notable_lines" ]; then
+      echo
+      echo "Notable findings:"
+      printf '%s\n' "$notable_lines"
+    fi
+  } > "$PORTDIR/summary.txt"
+
+  # Console output:
+  # - Show software line.
+  # - If ssh-audit flagged notable issues (e.g. Terrapin CVE), mention once in red.
+  echo -e "   ${purple}Software:${end} ${blue}${software}${end}"
+
+  if [ -n "$notable_lines" ]; then
+    echo -e "   ${red}[!] SSH issues flagged by ssh-audit (CVE/FATAL) – see report.${end}"
+  fi
+done
+
+exit 0

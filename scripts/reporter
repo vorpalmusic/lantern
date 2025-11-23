@@ -75,6 +75,84 @@ make_link_if() {
   printf '<a href="../%s">%s</a>' "$relpath" "$label"
 }
 
+# ---------------- SSH summary fragment (05-ssh.html) ----------------
+build_ssh_fragment() {
+  local frag="$FRAGDIR/05-ssh.html"
+
+  if [ ! -d "$OUTDIR/ssh" ]; then
+    return 0
+  fi
+
+  # ports as basenames, sorted numerically
+  local ports=()
+  mapfile -t ports < <(find "$OUTDIR/ssh" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n)
+
+  if [ ${#ports[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  : > "$frag"
+  echo '<h3>SSH Summary</h3>' >> "$frag"
+
+  local port portdir
+  for port in "${ports[@]}"; do
+    portdir="$OUTDIR/ssh/$port"
+    [ -d "$portdir" ] || continue
+
+    local software esc_software
+    software="unknown"
+
+    if [ -s "$portdir/summary.txt" ]; then
+      software="$(grep -m1 '^Software / banner:' "$portdir/summary.txt" 2>/dev/null | sed 's/^Software \/ banner:[[:space:]]*//')"
+      [ -z "$software" ] && software="unknown"
+    fi
+
+    esc_software="$(printf '%s' "$software" | html_escape)"
+
+    # Grab critical lines from ssh-audit.txt (FATAL or CVE-)
+    local critical
+    critical=""
+    if [ -s "$portdir/ssh-audit.txt" ]; then
+      critical="$(grep -E 'FATAL|CVE-' "$portdir/ssh-audit.txt" 2>/dev/null | head -n 8 || true)"
+    fi
+
+    # Build basic links to raw SSH artifacts
+    local link_items=()
+    link_items+=("$(make_link_if 'ssh-audit' "ssh/$port/ssh-audit.txt")")
+    link_items+=("$(make_link_if 'nmap ssh'  "ssh/$port/nmap_ssh.txt")")
+    link_items+=("$(make_link_if 'summary'   "ssh/$port/summary.txt")")
+
+    local links
+    links="$(emit_links "${link_items[@]}")"
+
+    {
+      echo "<div class=\"lantern-port\">"
+      echo "  <h4>Port <code>$port</code> — SSH</h4>"
+      echo "  <div class=\"lantern-meta\">"
+      echo "    <strong>Software:</strong> $esc_software"
+      echo "  </div>"
+    } >> "$frag"
+
+    # Inline critical findings (if any) directly above links and details
+    if [ -n "$critical" ]; then
+      echo "  <div class=\"lantern-meta lantern-ssh-critical\"><strong>Critical SSH findings:</strong><br><pre>" >> "$frag"
+      printf '%s\n' "$critical" | html_escape >> "$frag"
+      echo "  </pre></div>" >> "$frag"
+    fi
+
+    echo "  <div class=\"lantern-files\">${links:-<em>No SSH artifacts present.</em>}</div>" >> "$frag"
+
+    # Collapsed ssh-audit preview (two-column, minimized by default)
+    if [ -s "$portdir/ssh-audit.txt" ]; then
+      echo "  <details style=\"margin-top:.4rem\"><summary>View full SSH analysis (ssh-audit)</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
+      sed -n '1,400p' "$portdir/ssh-audit.txt" | html_escape >> "$frag"
+      echo "  </pre></details>" >> "$frag"
+    fi
+
+    echo "</div>" >> "$frag"
+  done
+}
+
 # ---------------- HTTP summary fragment (10-http.html) ----------------
 build_http_fragment() {
   local frag="$FRAGDIR/10-http.html"
@@ -87,21 +165,21 @@ build_http_fragment() {
     return
   fi
 
-  shopt -s nullglob
-  local ports=( "$OUTDIR"/http/* )
-  shopt -u nullglob
+  # ports as basenames, sorted numerically
+  local ports=()
+  mapfile -t ports < <(find "$OUTDIR/http" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n)
 
   if [ ${#ports[@]} -eq 0 ]; then
     echo '<p><em>No HTTP artifacts found.</em></p>' >> "$frag"
     return
   fi
 
-  local portdir
-  for portdir in "${ports[@]}"; do
+  local port portdir
+  for port in "${ports[@]}"; do
+    portdir="$OUTDIR/http/$port"
     [ -d "$portdir" ] || continue
-    local port title esc_title
-    port="$(basename "$portdir")"
 
+    local title esc_title
     if [ -s "$portdir/title.txt" ]; then
       title="$(tr -d '\r\n' < "$portdir/title.txt")"
     else
@@ -261,6 +339,19 @@ cat > "$TMP" <<'HEAD'
 #lantern-report code{background:#f6f8fa;padding:0 .3rem;border-radius:6px}
 #lantern-report .lantern-files a{text-decoration:none}
 
+/* Critical SSH block */
+#lantern-report .lantern-ssh-critical{
+  color:#b91c1c;
+  font-weight:600;
+}
+#lantern-report .lantern-ssh-critical pre{
+  margin:.25rem 0 0;
+  padding:.25rem .5rem;
+  background:#fef2f2;
+  border-radius:4px;
+  font-size:.8rem;
+}
+
 /* Shared two-column tool output */
 #lantern-report pre.lantern-pre-twocol{
   max-height:400px;
@@ -279,6 +370,7 @@ cat > "$TMP" <<'HEAD'
   <h2>Lantern Modules</h2>
 HEAD
 
+build_ssh_fragment
 build_http_fragment
 build_cms_fragment
 
