@@ -29,13 +29,16 @@ insert_before_body_close() {
       if(!done && $0 ~ /<\/[Bb][Oo][Dd][Yy]>/) { print frag; done=1 }
     }
     END{ if(!done) print frag }
-  ' "$src_html" > "$tmp" && mv "$tmp" "$src_html"
+  ' "$src_html" > "$tmp" 2>/dev/null && mv "$tmp" "$src_html"
 }
 
-html_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+html_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
 
 emit_links() {
   local sep=""
+  local item
   for item in "$@"; do
     [ -n "$item" ] || continue
     printf "%s%s" "$sep" "$item"
@@ -93,6 +96,7 @@ build_http_fragment() {
     return
   fi
 
+  local portdir
   for portdir in "${ports[@]}"; do
     [ -d "$portdir" ] || continue
     local port title esc_title
@@ -124,6 +128,7 @@ build_http_fragment() {
 
     local extra_items=()
     shopt -s nullglob
+    local fpath
     for fpath in "$portdir"/*; do
       [ -f "$fpath" ] || continue
       local bn rel
@@ -151,8 +156,21 @@ build_http_fragment() {
   <div class="lantern-files">
     ${links:-<em>No per-port artifacts present.</em>}
   </div>
-</div>
 PORT
+
+    # Inline WhatWeb output in two-column block (if present)
+    if [ -s "$portdir/whatweb.txt" ]; then
+      {
+        echo '  <details open style="margin-top:.4rem">'
+        echo '    <summary>WhatWeb Output</summary>'
+        echo '    <pre class="lantern-pre-twocol">'
+        sed -n '1,400p' "$portdir/whatweb.txt" | html_escape
+        echo '    </pre>'
+        echo '  </details>'
+      } >> "$frag"
+    fi
+
+    echo "</div>" >> "$frag"
   done
 }
 
@@ -163,6 +181,7 @@ build_cms_fragment() {
   [ ${#cms_dirs[@]} -eq 0 ] && return 0
 
   local qualified=()
+  local cmsdir
   for cmsdir in "${cms_dirs[@]}"; do
     [ -s "$cmsdir/detected.txt" ] && qualified+=("$cmsdir")
   done
@@ -172,36 +191,58 @@ build_cms_fragment() {
   echo '<h3>CMS Findings</h3>' >> "$frag"
 
   for cmsdir in "${qualified[@]}"; do
-    local port detected
+    local port detected_raw detected_display
     port="$(basename "$(dirname "$cmsdir")")"
-    detected="$(tr -d '\r' < "$cmsdir/detected.txt" | head -n1)"
+    detected_raw="$(tr -d '\r' < "$cmsdir/detected.txt")"
+    detected_display="$(printf '%s\n' "$detected_raw" | paste -sd',' - | sed 's/,/, /g')"
 
     {
       echo "<div class=\"lantern-port\">"
       echo "  <h4>Port <code>$port</code></h4>"
-      echo "  <div class=\"lantern-meta\"><strong>Detected:</strong> $(printf '%s' "$detected" | html_escape)</div>"
+      echo "  <div class=\"lantern-meta\"><strong>Detected:</strong> $(printf '%s' "$detected_display" | html_escape)</div>"
     } >> "$frag"
 
-    case "$detected" in
-      wordpress)
-        wdir="http/$port/cms/wordpress"
-        links=()
-        links+=("$(make_link_if 'summary.txt' "$wdir/summary.txt")")
-        links+=("$(make_link_if 'wpscan.txt'   "$wdir/wpscan.txt")")
-        links+=("$(make_link_if 'wpscan.json'  "$wdir/wpscan.json")")
-        if printf '%s\n' "${links[*]}" | grep -q '[^[:space:]]'; then
-          echo "  <div class=\"lantern-files\">$(emit_links "${links[@]}")</div>" >> "$frag"
-        fi
-        if [ -s "$OUTDIR/$wdir/summary.txt" ]; then
-          echo "  <details style=\"margin-top:.4rem\"><summary>Preview summary.txt</summary><pre>" >> "$frag"
-          tail -n 200 "$OUTDIR/$wdir/summary.txt" | html_escape >> "$frag"
-          echo "  </pre></details>" >> "$frag"
-        fi
-        ;;
-      *)
-        :
-        ;;
-    esac
+    # ----- WordPress block -----
+    if grep -qi '^wordpress$' "$cmsdir/detected.txt"; then
+      local wdir links_wp
+      wdir="http/$port/cms/wordpress"
+      links_wp=()
+      links_wp+=("$(make_link_if 'summary.txt' "$wdir/summary.txt")")
+      links_wp+=("$(make_link_if 'wpscan.txt'   "$wdir/wpscan.txt")")
+      links_wp+=("$(make_link_if 'wpscan.json'  "$wdir/wpscan.json")")
+
+      if printf '%s\n' "${links_wp[*]}" | grep -q '[^[:space:]]'; then
+        echo "  <div class=\"lantern-files\"><strong>WordPress:</strong> $(emit_links "${links_wp[@]}")</div>" >> "$frag"
+      fi
+
+      # Inline WordPress summary in two-column block
+      if [ -s "$OUTDIR/$wdir/summary.txt" ]; then
+        echo "  <details open style=\"margin-top:.4rem\"><summary>Preview WordPress summary.txt</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
+        tail -n 200 "$OUTDIR/$wdir/summary.txt" | html_escape >> "$frag"
+        echo "  </pre></details>" >> "$frag"
+      fi
+    fi
+
+    # ----- Joomla block -----
+    if grep -qi '^joomla$' "$cmsdir/detected.txt"; then
+      local jdir links_j
+      jdir="http/$port/cms/joomla"
+      links_j=()
+      links_j+=("$(make_link_if 'summary.txt'   "$jdir/summary.txt")")
+
+      if printf '%s\n' "${links_j[*]}" | grep -q '[^[:space:]]'; then
+        echo "  <div class=\"lantern-files\"><strong>Joomla:</strong> $(emit_links "${links_j[@]}")</div>" >> "$frag"
+      fi
+
+      # Inline JoomScan output in same two-column style (strip ANSI here just in case)
+      if [ -s "$OUTDIR/$jdir/joomscan.txt" ]; then
+        echo "  <details open style=\"margin-top:.4rem\"><summary>View Joomla scan details (JoomScan)</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
+        sed -n '1,400p' "$OUTDIR/$jdir/joomscan.txt" \
+          | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+          | html_escape >> "$frag"
+        echo "  </pre></details>" >> "$frag"
+      fi
+    fi
 
     echo "</div>" >> "$frag"
   done
@@ -219,6 +260,20 @@ cat > "$TMP" <<'HEAD'
 #lantern-report .lantern-meta{color:#555;font-size:.9rem;margin-bottom:.4rem}
 #lantern-report code{background:#f6f8fa;padding:0 .3rem;border-radius:6px}
 #lantern-report .lantern-files a{text-decoration:none}
+
+/* Shared two-column tool output */
+#lantern-report pre.lantern-pre-twocol{
+  max-height:400px;
+  overflow:auto;
+  background:#020617;
+  color:#e5e7eb;
+  padding:.5rem .75rem;
+  border-radius:6px;
+  font-size:.8rem;
+  column-count:2;
+  column-gap:1.5rem;
+  white-space:pre-wrap;
+}
 </style>
 <section id="lantern-report">
   <h2>Lantern Modules</h2>

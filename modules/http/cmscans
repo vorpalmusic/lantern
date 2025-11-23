@@ -3,6 +3,11 @@
 # Usage: cmscans OUTDIR IP PORT
 set -euo pipefail
 
+## colors
+SCRIPTDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+. "$SCRIPTDIR/../../lib/colors"
+
 OUTDIR="${1:-}"; IP="${2:-}"; PORT="${3:-}"
 if [ -z "$OUTDIR" ] || [ -z "$IP" ] || [ -z "$PORT" ]; then
   echo "Usage: $0 OUTDIR IP PORT" >&2
@@ -10,9 +15,10 @@ if [ -z "$OUTDIR" ] || [ -z "$IP" ] || [ -z "$PORT" ]; then
 fi
 
 DEST="$OUTDIR/http/$PORT"
-[ -d "$DEST" ] || { echo "[!] cmscans: $DEST missing; run http-collect first." >&2; exit 1; }
+[ -d "$DEST" ] || { echo -e "${red}[!] cmscans: $DEST missing; run http-collect first.${end}" >&2; exit 1; }
 
 # artifacts we already have
+## HTTP/S
 BODY="$DEST/body.html"
 HEADERS="$DEST/headers.txt"
 ABOUT="$DEST/about.html"
@@ -26,46 +32,106 @@ any_file_has() { local rx="$1"; shift; local f; for f in "$@"; do file_has "$rx"
 
 # ---------- detection (filesystem-only) ----------
 wp=0
+joomla=0
 logbuf="[*] CMS scan (fs-only) $IP:$PORT"$'\n'
 
+# --- WordPress detection ---
 file_has '\bWordPress\b' "$WHATWEB" && { wp=1; logbuf+=$'[+] whatweb indicates WordPress\n'; }
-any_file_has 'name=["'\'']generator["'\''][^>]*content=["'\'']WordPress' "$BODY" "$ABOUT" "$CONTACT" && { wp=1; logbuf+=$'[+] meta generator WordPress\n'; }
-any_file_has '/wp-content/|/wp-includes/' "$BODY" "$ABOUT" "$CONTACT" && { wp=1; logbuf+=$'[+] HTML contains wp-content/wp-includes\n'; }
-file_has '(^|\s)X-Powered-By:\s*WordPress\b' "$HEADERS" && { wp=1; logbuf+=$'[+] Header X-Powered-By: WordPress\n'; }
-file_has '(^|\s)Link:\s*<[^>]*api\.w\.org[^>]*>' "$HEADERS" && { wp=1; logbuf+=$'[+] Header Link: …api.w.org…\n'; }
-file_has 'wp-admin' "$ROBOTS" && { wp=1; logbuf+=$'[+] robots.txt references wp-admin\n'; }
-file_has 'wp-sitemap\.xml' "$SITEMAP" && { wp=1; logbuf+=$'[+] sitemap references wp-sitemap.xml\n'; }
+any_file_has 'name=["'\''"]generator["'\''"][^>]*content=["'\''"]WordPress' "$BODY" "$ABOUT" "$CONTACT" \
+  && { wp=1; logbuf+=$'[+] meta generator WordPress\n'; }
+any_file_has '/wp-content/|/wp-includes/' "$BODY" "$ABOUT" "$CONTACT" \
+  && { wp=1; logbuf+=$'[+] HTML contains wp-content/wp-includes\n'; }
+file_has '(^|\r?\n)X-Powered-By:\s*WordPress\b' "$HEADERS" \
+  && { wp=1; logbuf+=$'[+] Header X-Powered-By: WordPress\n'; }
+file_has '(^|\r?\n)Link:\s*<[^>]*api\.w\.org[^>]*>' "$HEADERS" \
+  && { wp=1; logbuf+=$'[+] Header Link: …api.w.org…\n'; }
+file_has 'wp-admin' "$ROBOTS" \
+  && { wp=1; logbuf+=$'[+] robots.txt references wp-admin\n'; }
+file_has 'wp-sitemap\.xml' "$SITEMAP" \
+  && { wp=1; logbuf+=$'[+] sitemap references wp-sitemap.xml\n'; }
 
-# Only proceed if a CMS (WordPress) was detected
+# --- Joomla detection (also artifacts-only) ---
+# 1) whatweb hints
+file_has '\bJoomla\b' "$WHATWEB" \
+  && { joomla=1; logbuf+=$'[+] whatweb indicates Joomla\n'; }
+
+# 2) meta generator Joomla
+any_file_has 'name=["'\''"]generator["'\''"][^>]*content=["'\''"][^"'\''>]*Joomla' "$BODY" "$ABOUT" "$CONTACT" \
+  && { joomla=1; logbuf+=$'[+] meta generator Joomla\n'; }
+
+# 3) Joomla-ish paths in HTML
+any_file_has '/components/com_[a-z0-9_-]+|/media/system/js/|/templates/[a-z0-9_-]+' "$BODY" "$ABOUT" "$CONTACT" \
+  && { joomla=1; logbuf+=$'[+] HTML contains common Joomla component/template paths\n'; }
+
+# 4) Joomla headers (some sites set these)
+file_has '(^|\r?\n)X-Content-Managed-By:\s*Joomla' "$HEADERS" \
+  && { joomla=1; logbuf+=$'[+] Header X-Content-Managed-By: Joomla\n'; }
+file_has '(^|\r?\n)Set-Cookie:\s*[^;]*joomla_[^=]*=' "$HEADERS" \
+  && { joomla=1; logbuf+=$'[+] Header Set-Cookie contains joomla_ cookie\n'; }
+
+# If nothing was detected, do nothing
+if [ "$wp" -eq 0 ] && [ "$joomla" -eq 0 ]; then
+  exit 0
+fi
+
+CMSDIR="$DEST/cms"
+mkdir -p "$CMSDIR"
+
+# Write detected CMS list
+{
+  [ "$wp" -eq 1 ] && echo "wordpress"
+  [ "$joomla" -eq 1 ] && echo "joomla"
+} > "$CMSDIR/detected.txt"
+
+# Write detection log
+printf '%s' "$logbuf" > "$CMSDIR/_cms-detect.log"
+
+# ---------- WordPress scan (WPScan) ----------
 if [ "$wp" -eq 1 ]; then
-  CMSDIR="$DEST/cms"
   WPDIR="$CMSDIR/wordpress"
   mkdir -p "$WPDIR"
-  printf '%s\n' "wordpress" > "$CMSDIR/detected.txt"
-  printf '%s' "$logbuf" > "$CMSDIR/_cms-detect.log"
 
   if command -v wpscan >/dev/null 2>&1; then
     URL="http://$IP:$PORT/"
     OUT_TXT="$WPDIR/wpscan.txt"
 
-    echo "[*] CMS: WordPress detected on ${IP}:${PORT} — running WPScan (quick mode)."
-    wpscan --url "$URL" --no-update --no-banner --format cli 1>"$OUT_TXT" || true
+    echo -e "${yellow}[*]${end} ${purple}CMS: WordPress detected on:${end} ${blue}${IP}:${PORT}${end} ${purple}— running WPScan.${end}"
+    wpscan --url "$URL" --no-update --no-banner --no-color --format cli 1>"$OUT_TXT" 2>&1 || true
 
-    # create a short summary for reporter
     {
       echo "WPScan summary:"
       grep -E 'Interesting Finding:|Vulnerable|[0-9]+ plugin|[0-9]+ theme' "$OUT_TXT" 2>/dev/null || true
     } > "$WPDIR/summary.txt"
 
-
-    echo "[*] CMS: WPScan finished for ${IP}:${PORT}. Artifacts: http/${PORT}/cms/wordpress/"
+    echo -e "${yellow}[*]${end} ${purple}CMS: WPScan finished for${end} ${blue}${IP}:${PORT}.${end} ${purple}Artifacts: http/${PORT}/cms/wordpress/${end}"
   else
     echo "wpscan not installed" > "$WPDIR/NOTICE.txt" 2>/dev/null || true
   fi
-
-  echo "cms-scan:$CMSDIR"
-  echo "wordpress: yes"
-else
-  # No CMS → create nothing and stay silent
-  exit 0
 fi
+
+# ---------- Joomla scan (JoomScan) ----------
+if [ "$joomla" -eq 1 ]; then
+  JOOMDIR="$CMSDIR/joomla"
+  mkdir -p "$JOOMDIR"
+
+  if command -v joomscan >/dev/null 2>&1; then
+    URL="http://$IP:$PORT/"
+    OUT_TXT="$JOOMDIR/joomscan.txt"
+
+    echo -e "${yellow}[*]${end} ${purple}CMS: Joomla detected on${end} ${blue}${IP}:${PORT}${end} ${purple}— running JoomScan.${end}"
+    joomscan -u "$URL" 2>&1 \
+      | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+      > "$OUT_TXT" || true
+
+    {
+      echo "JoomScan summary:"
+      grep -Ei 'Vulnerable|Finding|Severity' "$OUT_TXT" 2>/dev/null || true
+    } > "$JOOMDIR/summary.txt"
+
+    echo -e "${yellow}[*]${end} ${purple}CMS: JoomScan finished for${end} ${blue}${IP}:${PORT}.${end} ${purple}Artifacts: http/${PORT}/cms/joomla/${end}"
+  else
+    echo "joomscan not installed" > "$JOOMDIR/NOTICE.txt" 2>/dev/null || true
+  fi
+fi
+
+exit 0
