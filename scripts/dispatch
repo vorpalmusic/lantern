@@ -58,11 +58,11 @@ ssh_pid=""
 http_pid=""
 http_cms_pid=""
 
-echo -e "${yellow}[*]${end} ${purple}Launching service modules in parallel...${end}"
+echo -e "${yellow}[*]${end} ${purple}Launching service modules in parallel:${end}"
 
 # --- SSH module (runs fully parallel, printed by a polling helper) ---
 if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Starting SSH module...${end}"
+  echo -e "${yellow}  [-]${end} ${purple}Starting SSH module...${end}"
   "$SSH_MASTER" "$OUTDIR" "$TARGET" "$TARGETED_XML" "$PORTS" >"$LOGDIR/ssh.log" 2>&1 &
   ssh_pid=$!
 
@@ -85,7 +85,7 @@ fi
 
 # --- HTTP core module (detect/collect/enrich/add-hosts) ---
 if [ "$has_http" = true ] && [ -x "$HTTP_MASTER" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Starting HTTP module...${end}"
+  echo -e "${yellow}  [-]${end} ${purple}Starting HTTP module...${end}"
   "$HTTP_MASTER" "$OUTDIR" "$TARGET" >"$LOGDIR/http.log" 2>&1 &
   http_pid=$!
 elif [ "$has_http" = true ] && [ ! -x "$HTTP_MASTER" ]; then
@@ -93,11 +93,9 @@ elif [ "$has_http" = true ] && [ ! -x "$HTTP_MASTER" ]; then
 fi
 
 if [ -z "$ssh_pid" ] && [ -z "$http_pid" ]; then
-  echo -e "${yellow}[!]${end} ${purple}No service modules to run.${end}"
+  echo -e "${yellow}  [!] No service modules to run.${end}"
   exit 0
 fi
-
-echo -e "${yellow}[*]${end} ${purple}Waiting for HTTP core to complete (SSH continues in parallel)...${end}"
 
 # --- Wait for HTTP core (only) and then start HTTP CMS ---
 if [ -n "$http_pid" ]; then
@@ -109,13 +107,11 @@ if [ -n "$http_pid" ]; then
 
   # Now that http-master is done, verified-ports.txt exists if there are HTTP ports.
   if [ "$has_http" = true ] && [ -x "$HTTP_CMS_MASTER" ]; then
-    echo -e "${yellow}[*]${end} ${purple}Starting HTTP CMS module...${end}"
+    echo -e "\n${yellow}[!] Starting HTTP CMS module...This is often lengthy...${end}"
     "$HTTP_CMS_MASTER" "$OUTDIR" "$TARGET" >"$LOGDIR/http-cms.log" 2>&1 &
     http_cms_pid=$!
   fi
 fi
-
-echo -e "${yellow}[*]${end} ${purple}Waiting for remaining modules (SSH / HTTP-CMS) to complete...${end}"
 
 # --- Wait for HTTP CMS, print its block ---
 if [ -n "$http_cms_pid" ]; then

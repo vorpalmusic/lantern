@@ -81,7 +81,7 @@ for port in $ssh_ports; do
   PORTDIR="$OUTDIR/ssh/$port"
   mkdir -p "$PORTDIR"
 
-  echo -e "${yellow}[*]${end} ${purple}Enumerating SSH on${end} ${blue}${TARGET}:${port}${end}"
+  echo -e "${yellow}[*]${end} ${purple}Enumerated SSH on${end} ${blue}${TARGET}:${port}${end}"
 
   # 1) ssh-audit (if available)
   if command -v ssh-audit >/dev/null 2>&1; then

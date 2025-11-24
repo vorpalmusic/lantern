@@ -23,7 +23,7 @@ echo -e "${yellow}[*]${end} ${purple}Using output directory:${end} ${blue}$OUTDI
 
 ## BEGIN WORK.
 ### run fast discovery scan just to find open ports (no live verbose spam)
-echo -e "\n${yellow}[*]${end} ${purple}Scanning ports on${end} ${blue}$target${end}${purple}...${end}\n"
+echo -e "\n${yellow}[*]${end} ${purple}Rapid nmap port discovery on${end} ${blue}$target${end}${purple}...${end}\n"
 
 ALLPORTS="$REPORTDIR/allPorts"
 PART1="$REPORTDIR/allPorts.p1"
@@ -112,7 +112,7 @@ echo -e "\t${yellow}[*]${end} ${purple}Open ports:${end} ${blue}${ports:-<none>}
 TARGETED_XML="$REPORTDIR/targetedXML"
 
 if [ -n "$ports" ]; then
-  echo -e "\n${yellow}[*]${end} ${purple}Version and Service Scanning...${end}"
+  echo -e "${yellow}[*]${end} ${purple}Targeted version and service scanning with nmap...${end}"
   sudo /usr/bin/nmap -sCV -p"$ports" -n -Pn --max-retries 2 --host-timeout 120s "$target" -A \
        -oX "$TARGETED_XML" >/dev/null 2>&1
 else
