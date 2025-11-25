@@ -9,9 +9,23 @@ rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/n
 ## LOAD LIBRARIES
 . "$ROOTDIR/lib/colors"
 
+# Do NOT allow running Lantern as root; use regular user + internal sudo
+if [ "$EUID" -eq 0 ]; then
+  echo -e "${red}[!] Do not run lantern with sudo. Run it as a normal user, e.g.:${end}"
+  echo -e "${blue}    lantern <IP>${end}"
+  exit 1
+fi
+
 ## IF TARGET IP IS MISSING, GIVE ERROR ASKING FOR IT
 if [ -z "$1" ]; then
     echo -e "\n${yellow}[!]${end} ${purple}Usage:${end} ${blue}$0 <IP>${end}"
+    exit 1
+fi
+
+## HANDLE PRIVILEGES (for nmap SYN scans only)
+echo -e "${yellow}[*]${end} ${purple}Lantern needs elevated privileges ONLY for nmap SYN scans. The rest of the commands are run as normal user.${end}"
+if ! sudo -v; then
+    echo -e "${red}[!] sudo authentication failed; cannot run privileged nmap scans.${end}"
     exit 1
 fi
 
@@ -113,11 +127,14 @@ TARGETED_XML="$REPORTDIR/targetedXML"
 
 if [ -n "$ports" ]; then
   echo -e "${yellow}[*]${end} ${purple}Targeted version and service scanning with nmap...${end}"
-  sudo /usr/bin/nmap -sCV -p"$ports" -n -Pn --max-retries 2 --host-timeout 120s "$target" -A \
+  sudo /usr/bin/nmap -sCV -p"$ports" -n -Pn --max-retries 2 --host-timeout 120s "$target" \
        -oX "$TARGETED_XML" >/dev/null 2>&1
 else
   echo -e "${yellow}[!]${end} ${purple}No open ports detected; skipping targeted scan.${end}"
 fi
+
+## kill sudo now that it is no longer needed (at least we think for now)
+sudo -k >/dev/null 2>&1 || true
 
 # --- service dispatch (SSH / HTTP / HTTP-CMS, etc.) ---
 # Pass OUTDIR, target, targeted XML, and port list so dispatcher has context
