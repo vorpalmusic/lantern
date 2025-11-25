@@ -1,6 +1,6 @@
 #!/bin/bash
 # author: JackDaw
-version="v0.0.15"
+version="v0.0.16"
 
 ### GRAB IP 'target' AND ROOT DIRECTORY, THEN CALL PATHFINDER TO SET ALL RELATIVE PATH VARS
 rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
