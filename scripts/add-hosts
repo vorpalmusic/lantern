@@ -358,9 +358,9 @@ for name in "${!map[@]}"; do
   [[ "$name" == "$ip" ]] && continue   # skip IP → IP noise
 
   if upsert_host_entry "$ip" "$name"; then
-    [ "$DRY_RUN" -eq 0 ] && echo "Ensured ${name} → ${ip}"
+    [ "$DRY_RUN" -eq 0 ] && echo -e "${yellow}  [!]${end} ${blue}Ensured ${name} → ${ip}${end}"
   else
-    echo "ERROR: failed to upsert '${name}' into /etc/hosts (sudo?)" >&2
+    echo -e "${red}ERROR: failed to upsert '${name}' into /etc/hosts (sudo?)${end}" >&2
     exit 1
   fi
 done

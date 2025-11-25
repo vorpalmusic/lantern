@@ -134,4 +134,13 @@ if [ "$joomla" -eq 1 ]; then
   fi
 fi
 
-exit 0
+# Exit codes for clear console messaging:
+if [ "$wp" -eq 1 ] && [ "$joomla" -eq 1 ]; then
+  exit 3   # both
+elif [ "$wp" -eq 1 ]; then
+  exit 1   # wordpress
+elif [ "$joomla" -eq 1 ]; then
+  exit 2   # joomla
+else
+  exit 0   # fallback
+fi

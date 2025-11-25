@@ -1,8 +1,8 @@
 #!/bin/bash
 # author: JackDaw
+version="v0.0.15"
 
 ### GRAB IP 'target' AND ROOT DIRECTORY, THEN CALL PATHFINDER TO SET ALL RELATIVE PATH VARS
-target="$1"
 rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
 . "$rootdir/lib/pathfinder"
 
@@ -16,14 +16,38 @@ if [ "$EUID" -eq 0 ]; then
   exit 1
 fi
 
-## IF TARGET IP IS MISSING, GIVE ERROR ASKING FOR IT
-if [ -z "$1" ]; then
-    echo -e "\n${yellow}[!]${end} ${purple}Usage:${end} ${blue}$0 <IP>${end}"
+# Simple usage helper
+usage() {
+  echo -e "\n${yellow}[!]${end} ${purple}Usage:${end} ${blue}$0 <IP>${end}"
+  echo -e "   ${purple}or:${end} ${blue}$0 -v | --version${end}"
+  echo -e "   ${purple}or:${end} ${blue}$0 -h | --help${end}"
+}
+
+arg="${1:-}"
+
+case "$arg" in
+  -v|--version)
+    echo "Lantern $version"
+    exit 0
+    ;;
+  -h|--help|"")
+    usage
+    # empty arg or -h/--help: treat as “not enough arguments”
+    [ -z "$arg" ] && exit 1 || exit 0
+    ;;
+  -*)
+    # any other flag = unknown option
+    echo -e "${red}[!] Unknown option:${end} ${blue}$arg${end}"
+    usage
     exit 1
-fi
+    ;;
+esac
+
+# By this point, $1 must be an IP (or at least, not a flag)
+target="$1"
 
 ## HANDLE PRIVILEGES (for nmap SYN scans only)
-echo -e "${yellow}[*]${end} ${purple}Lantern needs elevated privileges ONLY for nmap SYN scans. The rest of the commands are run as normal user.${end}"
+echo -e "${yellow}[*]${end} ${purple}Lantern needs elevated privileges ONLY for certain tasks. The rest of the commands are run as normal user.${end}"
 if ! sudo -v; then
     echo -e "${red}[!] sudo authentication failed; cannot run privileged nmap scans.${end}"
     exit 1
@@ -33,11 +57,11 @@ fi
 mkdir -p "$OUTDIR" "$REPORTDIR"
 echo -e "${yellow}[*]${end} ${purple}Using output directory:${end} ${blue}$OUTDIR${end}"
 
-"$MODDIR/banner"        ## cue banner
+"$SCRIPTDIR/banner"        ## cue banner
 
 ## BEGIN WORK.
 ### run fast discovery scan just to find open ports (no live verbose spam)
-echo -e "\n${yellow}[*]${end} ${purple}Rapid nmap port discovery on${end} ${blue}$target${end}${purple}...${end}\n"
+echo -e "\n${yellow}[*]${end} ${purple}Rapid nmap port discovery on${end} ${blue}$target${end}${purple}...${end}"
 
 ALLPORTS="$REPORTDIR/allPorts"
 PART1="$REPORTDIR/allPorts.p1"
@@ -93,23 +117,18 @@ wait "$pid1" "$pid2" "$pid3" 2>/dev/null || true
 # Optionally clean up the parts
 rm -f "$PART1" "$PART2" "$PART3"
 
-# If greppable file exists, extract ports reliably and print them once
+# If greppable file exists, extract ports and print a compact summary only
 if [ -f "$ALLPORTS" ]; then
-  # extract unique port numbers (e.g. 22, 80)
   discovered_ports=$(grep -oP '\d{1,5}/open' "$ALLPORTS" | cut -d'/' -f1 | sort -n -u)
 
   if [ -n "$discovered_ports" ]; then
-    echo -e "${yellow}[*]${end} ${purple}Discovered open ports:${end}"
-    while IFS= read -r p; do
-      # sanity: ensure p is numeric
-      p="${p//[^0-9]/}"
-      [ -n "$p" ] && echo "  Discovered open port ${p}/tcp on $target"
-    done <<< "$discovered_ports"
+    summary="$(echo "$discovered_ports" | tr '\n' ',' | sed 's/,$//')"
+    echo -e "${yellow}[*]${end} ${purple}Open ports:${end} ${blue}${summary}${end}\n"
   else
-    echo -e "${yellow}[!]${end} ${purple}No open ports discovered in greppable output.${end}"
+    echo -e "${red}[!] No open ports discovered in greppable output.${end}\n"
   fi
 else
-  echo -e "${yellow}[!]${end} ${purple}Nmap greppable output missing: $ALLPORTS${end}"
+  echo -e "${red}[!] Nmap greppable output missing: $ALLPORTS${end}\n"
 fi
 
 ### grab all those ports from the nmap scan and put them in a list
@@ -118,15 +137,11 @@ if [ -f "$ALLPORTS" ]; then
   ports=$(grep -oP '\d{1,5}/open' "$ALLPORTS" | cut -d '/' -f1 | xargs | tr ' ' ',')
 fi
 
-echo -e "\n${yellow}[*]${end} ${purple}Extracting information...${end}\n"
-echo -e "\t${yellow}[*]${end} ${purple}IP Address:${end} ${blue}$target${end}"
-echo -e "\t${yellow}[*]${end} ${purple}Open ports:${end} ${blue}${ports:-<none>}${end}\n"
-
 # --- targeted scan (only if we have ports, runs synchronously) ---
 TARGETED_XML="$REPORTDIR/targetedXML"
 
 if [ -n "$ports" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Targeted version and service scanning with nmap...${end}"
+  echo -e "${yellow}[*]${end} ${purple}Targeted scanning on discovered ports...results will populate web report.${end}"
   sudo /usr/bin/nmap -sCV -p"$ports" -n -Pn --max-retries 2 --host-timeout 120s "$target" \
        -oX "$TARGETED_XML" >/dev/null 2>&1
 else
@@ -134,7 +149,8 @@ else
 fi
 
 ## kill sudo now that it is no longer needed (at least we think for now)
-sudo -k >/dev/null 2>&1 || true
+## never mind, we need to edit /etc/hosts too. research continues..
+# sudo -k >/dev/null 2>&1 || true
 
 # --- service dispatch (SSH / HTTP / HTTP-CMS, etc.) ---
 # Pass OUTDIR, target, targeted XML, and port list so dispatcher has context

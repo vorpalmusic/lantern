@@ -18,13 +18,17 @@ LISTDIR="$ROOTDIR/lists"
 # Colors
 . "$ROOTDIR/lib/colors"
 
+# Duplicate stderr onto fd 3 for "live" console output that bypasses dispatch logging
+exec 3>&2
+
 mkdir -p "$OUTDIR/http"
 
 # --- HTTP detect (reuses existing helper) ---
 eval "$("$MODDIR/http/http-detect" "$OUTDIR" "$TARGET")"
 
-echo -e "${yellow}[*]${end} ${purple}HTTP candidates:${end} ${blue}${HTTP_CAND:-<none>}${end}"
-echo -e "${yellow}[*]${end} ${purple}Verified HTTP ports:${end} ${blue}${HTTP_VERIFIED:-<none>}${end}"
+# Print *immediately* on fd 3 so they are not captured in http.log
+echo -e "${yellow}[*]${end} ${purple}HTTP candidates:${end} ${blue}${HTTP_CAND:-<none>}${end}" >&3
+echo -e "${yellow}[*]${end} ${purple}Verified HTTP ports:${end} ${blue}${HTTP_VERIFIED:-<none>}${end}" >&3
 
 # Persist verified ports for downstream modules (e.g. http-cms)
 VERIFIED_FILE="$OUTDIR/http/verified-ports.txt"
@@ -33,12 +37,19 @@ if [ -n "${HTTP_VERIFIED:-}" ]; then
   echo "$HTTP_VERIFIED" | tr ',' '\n' | sed 's/[^0-9]//g' | sed '/^$/d' | sort -n -u > "$VERIFIED_FILE"
 fi
 
-# --- HTTP collect per verified port ---
+# --- HTTP collect per verified port (run in parallel) ---
 if [ -n "${HTTP_VERIFIED:-}" ]; then
+  pids=()
   for p in $(echo "$HTTP_VERIFIED" | tr ',' ' '); do
     p="${p//[^0-9]/}"
     [ -z "$p" ] && continue
-    "$MODDIR/http/http-collect" "$OUTDIR" "$TARGET" "$p" >/dev/null 2>&1 || true
+    "$MODDIR/http/http-collect" "$OUTDIR" "$TARGET" "$p" >/dev/null 2>&1 || true &
+    pids+=("$!")
+  done
+
+  # wait for all http-collect jobs to finish before we read their artifacts
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
   done
 fi
 

@@ -107,7 +107,7 @@ if [ -n "$http_pid" ]; then
 
   # Now that http-master is done, verified-ports.txt exists if there are HTTP ports.
   if [ "$has_http" = true ] && [ -x "$HTTP_CMS_MASTER" ]; then
-    echo -e "\n${yellow}[!] Starting HTTP CMS module...This is often lengthy...${end}"
+    echo -e "\n${yellow}[*]${end} ${purple}Starting HTTP CMS detection module.${end}"
     "$HTTP_CMS_MASTER" "$OUTDIR" "$TARGET" >"$LOGDIR/http-cms.log" 2>&1 &
     http_cms_pid=$!
   fi

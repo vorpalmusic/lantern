@@ -18,16 +18,44 @@ MODDIR="$ROOTDIR/modules"
 
 VERIFIED_FILE="$OUTDIR/http/verified-ports.txt"
 if [ ! -s "$VERIFIED_FILE" ]; then
-  echo -e "${yellow}[*]${end} ${purple}http-cms: no verified HTTP ports file; skipping CMS scans.${end}"
+  echo -e "${yellow}[!] http-cms: no verified HTTP ports file; skipping CMS scans.${end}"
   exit 0
 fi
 
 ports="$(cat "$VERIFIED_FILE" | sed 's/[^0-9]//g' | sed '/^$/d' | sort -n -u)"
-[ -z "$ports" ] && { echo -e "${yellow}[*]${end} ${purple}http-cms: empty verified ports list; skipping.${end}"; exit 0; }
+[ -z "$ports" ] && { echo -e "${yellow}[!]$ http-cms: empty verified ports list; skipping.${end}"; exit 0; }
+
+cms_found=0
 
 for p in $ports; do
-  echo -e "${yellow}[*]${end} ${purple}Running cmscans for${end} ${blue}${TARGET}:${p}${end}"
-  "$MODDIR/http/cmscans" "$OUTDIR" "$TARGET" "$p" || true
+  result=0
+  "$MODDIR/http/cmscans" "$OUTDIR" "$TARGET" "$p" || result=$?
+
+  case "$result" in
+    1)
+      cms_found=1
+      echo -e "${yellow}[*]${end} ${purple}CMS detected on${end} ${blue}${TARGET}:${p}${end} ${purple}(WordPress).${end}"
+      ;;
+    2)
+      cms_found=1
+      echo -e "${yellow}[*]${end} ${purple}CMS detected on${end} ${blue}${TARGET}:${p}${end} ${purple}(Joomla).${end}"
+      ;;
+    3)
+      cms_found=1
+      echo -e "${yellow}[*]${end} ${purple}CMS detected on${end} ${blue}${TARGET}:${p}${end} ${purple}(WordPress + Joomla).${end}"
+      ;;
+    0)
+      # No output here — silent for "no CMS"
+      ;;
+    *)
+      echo -e "${red}[!] http-cms: cmscans returned unexpected code ${result} for${end} ${blue}${TARGET}:${p}${end}"
+      ;;
+  esac
 done
+
+if [ "$cms_found" -eq 0 ]; then
+  echo -e "${yellow}[!] No CMS detected on any verified HTTP ports.${end}"
+fi
+
 
 exit 0
