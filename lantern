@@ -1,13 +1,26 @@
 #!/bin/bash
+## lantern
 # author: JackDaw
 version="v0.0.16"
 
-### GRAB IP 'target' AND ROOT DIRECTORY, THEN CALL PATHFINDER TO SET ALL RELATIVE PATH VARS
+### GRAB ROOTDIR AND PATH VARS
 rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
 . "$rootdir/lib/pathfinder"
 
 ## LOAD LIBRARIES
 . "$ROOTDIR/lib/colors"
+
+CONFIG="$ROOTDIR/.config"
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# Run bootstrap only if depcheck==0
+if [ "$depcheck" -eq 0 ]; then
+  "$SCRIPTDIR/bootstrap"
+
+  # Re-source config in case bootstrap updated depcheck/init
+  [ -f "$CONFIG" ] && . "$CONFIG"
+  depcheck="${depcheck:-0}"
+fi
 
 # Do NOT allow running Lantern as root; use regular user + internal sudo
 if [ "$EUID" -eq 0 ]; then
@@ -46,12 +59,22 @@ esac
 # By this point, $1 must be an IP (or at least, not a flag)
 target="$1"
 
+# ---------------------------
+# Output directory logic
+# ---------------------------
+# Keep OUTDIR under the caller's current working directory
+BASEDIR="$(pwd)"
+OUTDIR="${BASEDIR}/${target}"
+REPORTDIR="${OUTDIR}/report"
+
 ## HANDLE PRIVILEGES (for nmap SYN scans only)
 echo -e "${yellow}[*]${end} ${purple}Lantern needs elevated privileges ONLY for certain tasks. The rest of the commands are run as normal user.${end}"
 if ! sudo -v; then
     echo -e "${red}[!] sudo authentication failed; cannot run privileged nmap scans.${end}"
     exit 1
 fi
+
+echo -e "${yellow}[*]${end} ${purple}Lantern config file is at:${end} ${blue}${CONFIG}${end}"
 
 ## MAKE OUTPUT FOLDER BASED ON TARGET IP + REPORT SUBFOLDER
 mkdir -p "$OUTDIR" "$REPORTDIR"
@@ -148,17 +171,10 @@ else
   echo -e "${yellow}[!]${end} ${purple}No open ports detected; skipping targeted scan.${end}"
 fi
 
-## kill sudo now that it is no longer needed (at least we think for now)
-## never mind, we need to edit /etc/hosts too. research continues..
-# sudo -k >/dev/null 2>&1 || true
-
 # --- service dispatch (SSH / HTTP / HTTP-CMS, etc.) ---
-# Pass OUTDIR, target, targeted XML, and port list so dispatcher has context
 "$ROOTDIR/scripts/dispatch" "$OUTDIR" "$target" "$TARGETED_XML" "$ports" || true
-# --- end dispatcher ---
 
 # ... generate HTML deep dive
-# Robust stylesheet resolution: honor env if provided, else use common paths
 : "${NMAP_XSL:=/usr/share/nmap/nmap.xsl}"
 if [ ! -f "$NMAP_XSL" ]; then
   NMAP_XSL="$(find /usr/local/share /usr/share /opt -type f -name nmap.xsl 2>/dev/null | head -n1 || true)"
@@ -169,7 +185,6 @@ REPORT_HTML="$REPORTDIR/index.html"
 if [ -s "$TARGETED_XML" ]; then
   if [ -n "$NMAP_XSL" ] && [ -f "$NMAP_XSL" ]; then
     xsltproc -o "$REPORT_HTML" "$NMAP_XSL" "$TARGETED_XML" || echo "[!] xsltproc failed"
-    # >>> Append Lantern module summary via reporter <<<
     rep="$ROOTDIR/scripts/reporter"
     if [ -x "$rep" ]; then
       "$rep" "$OUTDIR" || echo "[!] reporter failed"
@@ -189,7 +204,6 @@ while [ $tries -lt 50 ] && [ ! -s "$REPORT_HTML" ]; do
   sleep 0.1
   tries=$((tries + 1))
 done
-# --- end wait loop ---
 
 if [ -s "$REPORT_HTML" ]; then
   # 1) Ensure no stale server is hogging 9999 (port conflicts cause silent failures)
@@ -201,15 +215,12 @@ if [ -s "$REPORT_HTML" ]; then
       sleep 0.2
     fi
   else
-    # Fallback if lsof is missing
     stale_pids="$(/usr/sbin/fuser -n tcp 9999 2>/dev/null || true)"
     [ -n "$stale_pids" ] && { echo "[*] Cleaning up existing server(s) on 9999: $stale_pids"; kill $stale_pids 2>/dev/null || true; sleep 0.2; }
   fi
 
-  # 2) Start a fresh server rooted at OUTDIR (so /http/... and /report/... both work)
   python3 -m http.server 9999 --bind 127.0.0.1 -d "$OUTDIR" >/dev/null 2>&1 &
   server_pid=$!
-  # give it a brief moment to fail fast if it will
   sleep 0.15
   if ! kill -0 "$server_pid" 2>/dev/null; then
     echo "[!] http.server failed to start on 127.0.0.1:9999 (likely EADDRINUSE or bad args)."
@@ -218,14 +229,10 @@ if [ -s "$REPORT_HTML" ]; then
   fi
   disown "$server_pid" 2>/dev/null || true
 
-  # index.html lives under report/
   url="http://127.0.0.1:9999/report/index.html"
-
   echo -e "${yellow}[*]${end} ${purple}Report:${end} ${blue}$url${end}"
 
-  # 3) Sanity check: confirm the server is serving THIS file (not an old docroot)
   if command -v curl >/dev/null 2>&1; then
-    # Compare sizes as a cheap fingerprint
     local_sz=$(wc -c < "$REPORT_HTML" 2>/dev/null || echo 0)
     remote_sz=$(curl -fsSI "$url" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r' )
     if [ -n "$remote_sz" ] && [ "$remote_sz" != "$local_sz" ]; then

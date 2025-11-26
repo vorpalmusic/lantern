@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+## bootstrap
+set -euo pipefail
+
+# Resolve project root (bootstrap is in $ROOTDIR/scripts)
+ROOTDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+CONFIG="$ROOTDIR/.config"
+
+# Colors
+. "$ROOTDIR/lib/colors"
+
+# Load config if present
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# Defaults ONLY if not already set in .config
+# init=1  -> treat as first run
+# init=0  -> initial setup already handled
+init="${init:-1}"
+depcheck="${depcheck:-0}"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Generic key=value updater:
+# - If key exists (line starts with "key="), replace that line.
+# - Otherwise, append key=value at the end.
+set_kv() {
+  local key="$1" value="$2"
+  if [ -f "$CONFIG" ]; then
+    if grep -q "^${key}=" "$CONFIG"; then
+      sed -i "s/^${key}=.*/${key}=${value}/" "$CONFIG"
+    else
+      printf '%s=%s\n' "$key" "$value" >>"$CONFIG"
+    fi
+  else
+    printf '%s=%s\n' "$key" "$value" >"$CONFIG"
+  fi
+}
+
+CORE_CMDS=(
+  nmap
+  curl
+  dig
+  ssh-audit
+  python3
+  xsltproc
+  xmlstarlet
+  whatweb
+  openssl
+  timeout
+  lsof
+  fuser
+)
+
+OPTIONAL_CMDS=(
+  wpscan
+  joomscan
+)
+
+echo
+
+# ---------------------------
+# Initial run logic (init==1)
+# ---------------------------
+if [ "$init" -eq 1 ]; then
+  echo -e "${yellow}[*]${end} ${purple}We see this is your first time running Lantern.${end}"
+  echo -e "${purple}    Thanks for installing it.${end}"
+  echo
+  echo -e "${yellow}[*]${end} ${purple}Would you like to install Lantern as a global command (${blue}lantern${purple})?${end}"
+  echo -e "    This will create a symlink at ${blue}/usr/local/bin/lantern${end}"
+  echo
+
+  read -r -p "$(echo -e "${yellow}Install global lantern command? [Y/n]: ${end}")" ans
+  case "$ans" in
+    n|N|no|NO)
+      echo -e "${yellow}[*]${end} ${purple}Skipping global install for now.${end}"
+      ;;
+    *)
+      install_dir="/usr/local/bin"
+      bin_target="${install_dir}/lantern"
+
+      if [ -L "$bin_target" ] || [ -f "$bin_target" ]; then
+        echo -e "${yellow}[*]${end} ${purple}Removing existing${end} ${blue}${bin_target}${end}"
+        sudo rm -f "$bin_target"
+      fi
+
+      echo -e "${yellow}[*]${end} ${purple}Installing global command at${end} ${blue}${bin_target}${end}"
+      sudo mkdir -p "$install_dir"
+      sudo ln -s "$ROOTDIR/lantern" "$bin_target"
+
+      echo -e "${yellow}[*]${end} ${green}Global command installed. You can now run:${end} ${blue}lantern <IP>${end}"
+      echo
+      ;;
+  esac
+
+  # Mark initial run handled (flip init from 1 -> 0 in .config)
+  set_kv init 0
+  init=0
+fi
+
+# ---------------------------
+# Dependency checks (core + optional)
+# ---------------------------
+
+echo -e "${yellow}[*]${end} ${purple}Let's validate the dependencies.${end}"
+
+missing_core=()
+missing_opt=()
+
+core_entries=()
+for cmd in "${CORE_CMDS[@]}"; do
+  if have "$cmd"; then
+    core_entries+=("${green}[OK]${end} ${cmd}")
+  else
+    core_entries+=("${red}[!!]${end} ${cmd}")
+    missing_core+=("$cmd")
+  fi
+done
+
+opt_entries=()
+for cmd in "${OPTIONAL_CMDS[@]}"; do
+  if have "$cmd"; then
+    opt_entries+=("${green}[OK]${end} ${cmd}")
+  else
+    opt_entries+=("${yellow}[--]${end} ${cmd}")
+    missing_opt+=("$cmd")
+  fi
+done
+
+print_grid() {
+  local cols=4
+  local count=0
+  local entry
+
+  for entry in "$@"; do
+    printf "   %b" "$entry"
+    count=$((count + 1))
+    if [ "$count" -eq "$cols" ]; then
+      echo
+      count=0
+    fi
+  done
+
+  # If we ended mid-row, add a newline – but do it in an if, not an && chain
+  if [ "$count" -ne 0 ]; then
+    echo
+  fi
+
+  return 0
+}
+
+echo
+echo -e "${yellow}[*]${end} ${purple}Core dependencies:${end}"
+print_grid "${core_entries[@]}"
+
+echo
+echo -e "${yellow}[*]${end} ${purple}Optional CMS tools:${end}"
+print_grid "${opt_entries[@]}"
+
+echo
+echo -e "${yellow}[*]${end} ${purple}Summary:${end}"
+if [ "${#missing_core[@]}" -eq 0 ]; then
+  echo -e "   ${green}Core dependencies: all present.${end}"
+else
+  echo -e "   ${red}Core dependencies missing:${end} ${blue}${missing_core[*]}${end}"
+fi
+
+if [ "${#missing_opt[@]}" -eq 0 ]; then
+  echo -e "   ${green}Optional CMS tools: all present.${end}"
+else
+  echo -e "   ${yellow}Optional CMS tools missing:${end} ${blue}${missing_opt[*]}${end}"
+fi
+
+# ---------------------------
+# If all core deps are present, mark depcheck=1 and exit
+# ---------------------------
+if [ "${#missing_core[@]}" -eq 0 ]; then
+  echo
+  echo -e "${yellow}[*]${end} ${purple}All core dependencies are already installed. Starting lantern.${end}"
+  set_kv depcheck 1
+  depcheck=1
+  echo
+  exit 0
+fi
+
+# ---------------------------
+# apt-get availability
+# ---------------------------
+
+if ! command -v apt-get >/dev/null 2>&1; then
+  echo
+  echo -e "${red}[!] 'apt-get' not found; skipping automatic installation.${end}"
+  echo -e "${yellow}    Install these manually on your platform:${end}"
+  [ "${#missing_core[@]}" -gt 0 ] && echo -e "    ${yellow}Core missing:${end} ${blue}${missing_core[*]}${end}"
+  [ "${#missing_opt[@]}"  -gt 0 ] && echo -e "    ${yellow}Optional missing:${end} ${blue}${missing_opt[*]}${end}"
+  echo
+  echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"
+  exit 0
+fi
+
+# ---------------------------
+# Install options
+# ---------------------------
+
+echo
+echo -e "${yellow}[*]${end} ${purple}This system supports apt-get. Choose installation option:${end}"
+echo -e "   ${blue}[1]${end} Install ${red}nothing${end} (just show what is missing)"
+echo -e "   ${blue}[2]${end} Install ${purple}core${end} dependencies only"
+echo -e "   ${blue}[3]${end} Install ${purple}core${end} ${yellow}+ optional${end} dependencies"
+
+read -r -p "$(echo -e "${yellow}Selection [1/2/3, default 1]: ${end}")" choice
+
+pkgs=()
+case "$choice" in
+  2)
+    [ "${#missing_core[@]}" -gt 0 ] && pkgs+=("${missing_core[@]}")
+    ;;
+  3)
+    [ "${#missing_core[@]}" -gt 0 ] && pkgs+=("${missing_core[@]}")
+    [ "${#missing_opt[@]}"  -gt 0 ] && pkgs+=("${missing_opt[@]}")
+    ;;
+  ""|1|*)
+    echo -e "${yellow}[*]${end} ${purple}Skipping automatic package installation.${end}"
+    echo
+    echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"
+    exit 0
+    ;;
+esac
+
+if [ "${#pkgs[@]}" -eq 0 ]; then
+  echo -e "${yellow}[*]${end} ${purple}Nothing to install (selection resolved to empty set).${end}"
+  echo
+  echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"
+  exit 0
+fi
+
+echo
+echo -e "${yellow}[*]${end} ${purple}Updating apt cache...${end}"
+sudo apt-get update
+
+echo -e "${yellow}[*]${end} ${purple}Installing:${end} ${blue}${pkgs[*]}${end}"
+sudo apt-get install -y "${pkgs[@]}"
+
+# Re-check core deps after installation
+missing_core=()
+for cmd in "${CORE_CMDS[@]}"; do
+  if ! have "$cmd"; then
+    missing_core+=("$cmd")
+  fi
+done
+
+if [ "${#missing_core[@]}" -eq 0 ]; then
+  echo
+  echo -e "${yellow}[*]${end} ${green}All required core dependencies are now installed.${end}"
+  set_kv depcheck 1
+  depcheck=1
+  echo -e "${yellow}[*]${end} ${purple}Marked${end} ${blue}depcheck=1${end} ${purple}in:${end} ${blue}${CONFIG}${end}"
+else
+  echo
+  echo -e "${red}[!] Some core dependencies are still missing after installation:${end} ${blue}${missing_core[*]}${end}"
+  echo -e "${yellow}[*]${end} ${purple}Leaving${end} ${blue}depcheck=0${end} ${purple}in:${end} ${blue}${CONFIG}${end}"
+fi
+
+echo
+echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"
+echo
+
+exit 0
