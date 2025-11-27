@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+## treasure
+
+### GRAB ROOTDIR FOR LIBRARIES
+rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." >/dev/null 2>&1 && pwd)"
+. $rootdir/lib/colors
 
 OUTDIR="${1:-}"
 
@@ -57,4 +61,4 @@ FRAG="$FRAGDIR/25-treasure.html"
   echo '</div>'
 } > "$FRAG"
 
-echo "[*] Treasure fragment generated."
+echo -e "${yellow}[*]${end} ${purple}Treasure fragment generated.${end}"

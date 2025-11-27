@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
+## reporter
+
+### GRAB ROOTDIR AND PATH VARS
+rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." >/dev/null 2>&1 && pwd)"
+. "$rootdir/lib/colors"
+
 
 OUTDIR="${1:-}"
 if [ -z "$OUTDIR" ] || [ ! -d "$OUTDIR" ]; then
@@ -389,4 +394,4 @@ echo "</section>" >> "$TMP"
 insert_before_body_close "$IDX" "$TMP"
 rm -f "$TMP"
 
-echo "[*] Reporter appended module summary to $IDX"
+echo -e "${yellow}[*]${end} ${purple}Reporter appended module summary to${end} ${blue}${IDX}${end}"

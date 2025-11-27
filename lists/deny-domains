@@ -1,4 +1,5 @@
-# Common CDNs/analytics/vendors to ignore when harvesting hostnames
+## Common CDNs/analytics/vendors to ignore when harvesting hostnames
+## deny-domains
 fonts\.googleapis\.com
 getboostrap\.com
 github\.com
@@ -30,3 +31,4 @@ www\.w3\.org
 html\.design
 schema\.org
 html\.design
+nmap\.xsl

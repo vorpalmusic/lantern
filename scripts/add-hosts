@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # add-hosts — append missing "IP hostname" pairs from Nmap XML + HTTP probes to /etc/hosts
 # Usage:
-#   add-hosts OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose]
+#   add-hosts OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose] [--mode nmap|http|all]
 
-set -euo pipefail
-
-DRY_RUN=0
+ROOTDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
 
 # Upsert one host into /etc/hosts (update if host exists, else join same-IP line, else append)
 # Case-insensitive for hostnames; ignores trailing dot; preserves alias order/case; no backups.
@@ -22,6 +21,15 @@ upsert_host_entry() {
   # In dry-run mode, just print what we *would* do and bail early.
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     echo "[dry-run] would ensure ${host} → ${ip} (extras: ${alias_str})"
+    return 0
+  fi
+
+  # Fast path: if this "ip host" pair already exists, skip the heavy awk/tee.
+  # Still regex-based, but a bit stricter about word boundaries.
+  if grep -qiE "^[[:space:]]*$ip[[:space:]]+([^#]*[[:space:]])?${host}([[:space:]]|#|$)" /etc/hosts 2>/dev/null; then
+    if [ "${DRY_RUN:-0}" -eq 1 ]; then
+      echo "[dry-run] already present ${host} → ${ip}"
+    fi
     return 0
   fi
 
@@ -84,8 +92,8 @@ upsert_host_entry() {
       }
     }
     counts[N] = k
-    for (i = 1; i <= k; i++) names[N, i] = order[i]
-    for (i = 1; i <= k; i++) names_lc[N, i] = order_lc[i]
+    for (i = 1; i <= k; i++) names[N, i]     = order[i]
+    for (i = 1; i <= k; i++) names_lc[N, i]  = order_lc[i]
 
     # Did we see the target host on this line?
     for (i = 1; i <= k; i++) {
@@ -148,23 +156,28 @@ upsert_host_entry() {
     for (k in want) printf " %s", want[k]
     printf "\n"
   }
-  ' /etc/hosts | sudo tee /etc/hosts >/dev/null
+  ' /etc/hosts | sudo tee /etc/hosts >/dev/null || return 1
+
+  # If we got here, /etc/hosts was actually rewritten
+  NEW_HOSTS_ADDED=$((NEW_HOSTS_ADDED+1))
 }
 
 if [ "$#" -lt 2 ]; then
-  echo "Usage: $0 OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose]" >&2
+  echo "Usage: $0 OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose] [--mode nmap|http|all]" >&2
   exit 2
 fi
 
 OUTDIR="$1"; IP="$2"
-PORTS_ARG="${3:-}"
+PORTS_ARG=""
 
-# shift off OUTDIR/IP; leave PORTS if present (we’ll re-read it from $3)
+# shift off OUTDIR/IP; leave PORTS (if any) and flags
 shift 2
-ARGS=("$@")
 
+# defaults (can be overridden via env or flags)
+: "${DRY_RUN:=0}"
+: "${VERBOSE:=0}"
 ALLOW_REGEX=""
-VERBOSE=0
+MODE="all"
 
 # default deny file:
 #   script location: lantern/scripts/add-hosts
@@ -173,7 +186,50 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 DENY_FILE_DEFAULT="$SCRIPT_DIR/../lists/deny-domains"
 DENY_FILE="${ADD_HOSTS_DENY:-$DENY_FILE_DEFAULT}"
 
-# XML now comes from OUTDIR/report/
+ARGS=()
+
+# basic flag parser – only args starting with "--" are treated as options
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      ;;
+    --verbose)
+      VERBOSE=1
+      ;;
+    --allow-regex)
+      shift
+      ALLOW_REGEX="${1:-}"
+      ;;
+    --deny-file)
+      shift
+      DENY_FILE="${1:-$DENY_FILE_DEFAULT}"
+      ;;
+    --mode)
+      shift
+      MODE="${1:-all}"   # nmap | http | all
+      ;;
+    --*)
+      # unknown flag; just stash it
+      ARGS+=("$1")
+      ;;
+    *)
+      # first non-flag after OUTDIR/IP is ports if not already set
+      if [ -z "$PORTS_ARG" ]; then
+        PORTS_ARG="$1"
+      else
+        ARGS+=("$1")
+      fi
+      ;;
+  esac
+  shift || break
+done
+
+if [ -z "$IP" ]; then
+  echo -e "${red}[add-hosts] ERROR: IP argument is empty. Check caller signature.${end}" >&2
+  exit 1
+fi
+
 xml="$OUTDIR/report/targetedXML"
 DOMAIN_RE='([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}'
 
@@ -187,7 +243,7 @@ if [ -f "$DENY_FILE" ]; then
     DENY_PATTERNS+=("$line")
   done < "$DENY_FILE"
 else
-  [ $VERBOSE -eq 1 ] && echo "[info] deny file not found: $DENY_FILE (no denylist applied)" >&2
+  [ "$VERBOSE" -eq 1 ] && echo "[info] deny file not found: $DENY_FILE (no denylist applied)" >&2
 fi
 
 is_denied() {
@@ -201,7 +257,15 @@ is_denied() {
   return 1
 }
 
-# Add one candidate hostname → map[name]=ip after all filters
+# We keep a case-insensitive map:
+#   lc_host -> IP
+# and a canonical display name:
+#   lc_host -> first-seen original-case host
+declare -A host_ips=()    # lc_host -> ip
+declare -A host_canon=()  # lc_host -> original-case host
+NEW_HOSTS_ADDED=0         # count of actual writes to /etc/hosts this run
+
+# Add one candidate hostname → host_ips/host_canon after all filters
 add_candidate() {
   local nm="$1"
   local ip="$2"
@@ -214,18 +278,32 @@ add_candidate() {
     return 0
   fi
 
-  [[ "$nm" =~ ^(localhost|ip6-localhost|ip6-loopback)$ ]] && return 0
+  # normalized lowercase key
+  local lc
+  lc="${nm,,}"
 
+  # trivial local exclusions
+  if [[ "$lc" =~ ^(localhost|ip6-localhost|ip6-loopback)$ ]]; then
+    return 0
+  fi
+
+  # allow-regex filter (if set)
   if [ -n "$ALLOW_REGEX" ] && ! [[ "$nm" =~ $ALLOW_REGEX ]]; then
-    [ $VERBOSE -eq 1 ] && echo "[skip] $nm (allow-regex rejects)" >&2
-    return 0
-  fi
-  if is_denied "$nm"; then
-    [ $VERBOSE -eq 1 ] && echo "[deny] $nm (denylist)" >&2
+    [ "$VERBOSE" -eq 1 ] && echo "[skip] $nm (allow-regex rejects)" >&2
     return 0
   fi
 
-  [[ -z "${map[$nm]+x}" ]] && map["$nm"]="$ip"
+  # denylist
+  if is_denied "$nm"; then
+    [ "$VERBOSE" -eq 1 ] && echo "[deny] $nm (denylist)" >&2
+    return 0
+  fi
+
+  # case-insensitive dedupe: first-seen wins for canonical casing
+  if [[ -z "${host_ips[$lc]+x}" ]]; then
+    host_ips["$lc"]="$ip"
+    host_canon["$lc"]="$nm"
+  fi
 }
 
 # generic: scan a file for DOMAIN_RE tokens and add them
@@ -239,130 +317,124 @@ scan_file_for_domains() {
   done < <(grep -oE "$DOMAIN_RE" "$file" 2>/dev/null | sort -u)
 }
 
-declare -A map=()   # name -> ip
+# ---------- 1) Extract FQDNs from Nmap XML (only if mode includes nmap) ----------
+# Assumption: targetedXML is per-host, so every domain-like token belongs to $IP.
 
-# ---------- 1a) Extract hostnames from XML (Nmap <hostnames>) ----------
-if command -v xmlstarlet >/dev/null 2>&1; then
+if [[ "$MODE" == "all" || "$MODE" == "nmap" ]]; then
   if [ -s "$xml" ]; then
-    while IFS= read -r line; do
-      ippart="${line%% *}"
-      namespart="${line#* }"
-      [ -z "$ippart" ] && continue
-      for nm in $namespart; do
-        [[ -z "$nm" ]] && continue
-        nm="${nm%.}"  # strip trailing dots
-        add_candidate "$nm" "$ippart"
-      done
-    done < <(
-      xmlstarlet sel -t -m "//host[status/@state='up']" \
-        -v "address/@addr" -o " " \
-        -m "hostnames/hostname" -v "@name" -o " " -b -n "$xml" 2>/dev/null \
-      | sed -E 's/[[:space:]]+/ /g; s/ $//'
-    )
+    echo -e "${yellow}[*] [add-hosts]:${end} ${purple}Extracting hostnames from Nmap XML...${end}"
+    while IFS= read -r host; do
+      [ "$VERBOSE" -eq 1 ] && echo "  [nmap] candidate: $host" >&2
+      add_candidate "$host" "$IP"
+    done < <(grep -oE "$DOMAIN_RE" "$xml" 2>/dev/null | sort -u)
   else
-    [ $VERBOSE -eq 1 ] && echo "[info] XML file missing or empty: $xml" >&2
+    [ "$VERBOSE" -eq 1 ] && echo "[info] no Nmap XML at $xml" >&2
   fi
-else
-  [ $VERBOSE -eq 1 ] && echo "[info] xmlstarlet not installed; skipping Nmap hostname extraction" >&2
 fi
 
-# ---------- 1b) Extract FQDN-like tokens from Nmap script outputs ----------
-# This is where we pick up things like "dc01.example.com" from smb-os-discovery, etc.
-if command -v xmlstarlet >/dev/null 2>&1 && [ -s "$xml" ]; then
-  while IFS= read -r line; do
-    ippart="${line%% *}"
-    payload="${line#* }"
-    [ -z "$ippart" ] && continue
-    [ -z "$payload" ] && continue
+# ---------- 2) Harvest domains from HTTP artifacts under OUTDIR/report/http (mode http/all) ----------
 
-    while IFS= read -r nm; do
-      add_candidate "$nm" "$ippart"
-    done < <(printf '%s\n' "$payload" | grep -oE "$DOMAIN_RE" | sort -u || true)
-  done < <(
-    xmlstarlet sel -t \
-      -m "//host[status/@state='up']" \
-        -v "address/@addr" -o " " \
-        -m ".//script" -v "@output" -o " " -b -n "$xml" 2>/dev/null \
-    | sed -E 's/[[:space:]]+/ /g; s/ $//'
-  )
-fi
-
-# ---------- 2) Harvest domains from HTTP artifacts under OUTDIR/report/http ----------
 HTTP_ROOT="$OUTDIR/report/http"
-if [ -d "$HTTP_ROOT" ]; then
-  # Each port has its own dir: OUTDIR/report/http/<port>/
-  while IFS= read -r portdir; do
-    [ -d "$portdir" ] || continue
+if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
+  if [ -d "$HTTP_ROOT" ]; then
+    echo -e "${yellow}[*] [add-hosts]:${end} ${purple}Harvesting hostnames from HTTP artifacts...${end}"
+    # Each port has its own dir: OUTDIR/report/http/<port>/
+    while IFS= read -r portdir; do
+      [ -d "$portdir" ] || continue
 
-    # 2a) Headers (Location:, etc.) — just treat any header domains as candidates
-    scan_file_for_domains "$portdir/headers.txt" "$IP"
+      # 2a) Headers (Location:, etc.)
+      scan_file_for_domains "$portdir/headers.txt" "$IP"
 
-    # 2b) Hosts extracted from body (hosts_from_body.txt)
-    scan_file_for_domains "$portdir/hosts_from_body.txt" "$IP"
+      # 2b) Hosts extracted from body (hosts_from_body.txt)
+      scan_file_for_domains "$portdir/hosts_from_body.txt" "$IP"
 
-    # 2c) Certificate SANs from cert.txt (DNS: entries)
-    cert_file="$portdir/cert.txt"
-    if [ -s "$cert_file" ]; then
-      while IFS= read -r nm; do
-        add_candidate "$nm" "$IP"
-      done < <(grep -oiE "DNS:$DOMAIN_RE" "$cert_file" 2>/dev/null \
-               | sed -E 's/^DNS://I' \
-               | sort -u)
-    fi
-
-  done < <(find "$HTTP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)
-fi
-
-# --- 3) harvest domains from http-collected emails and verify via Host header ---
-if [ -n "${PORTS_ARG:-}" ]; then
-  email_domains_file="$(mktemp)"
-  trap 'rm -f "$email_domains_file"' EXIT
-
-  # web artifacts now live under OUTDIR/report/http
-  while IFS= read -r ef; do
-    [ -s "$ef" ] || continue
-    awk -F'@' '{if (NF>=2) print $NF}' "$ef" \
-      | tr 'A-Z' 'a-z' \
-      | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-      >> "$email_domains_file"
-  done < <(find "$HTTP_ROOT" -maxdepth 2 -type f -name 'emails.txt' 2>/dev/null || true)
-
-  if [ -s "$email_domains_file" ]; then
-    while IFS= read -r dom; do
-      [[ -z "$dom" ]] && continue
-      dom="${dom%.}"  # strip trailing dot
-
-      verified_hit=0
-      for p in $(echo "$PORTS_ARG" | tr ',' ' '); do
-        p="${p//[^0-9]/}"; [ -z "$p" ] && continue
-        if curl -sI --max-time 4 -H "Host: $dom" "http://$IP:$p/" \
-          | head -n1 \
-          | grep -qE 'HTTP/[0-9.]+\ [12][0-9]{2}|HTTP/[0-9.]+\ 3[0-9]{2}'; then
-          verified_hit=1
-          break
-        fi
-      done
-      if [ "$verified_hit" -eq 1 ]; then
-        add_candidate "$dom" "$IP"
+      # 2c) Certificate SANs from cert.txt (DNS: entries)
+      cert_file="$portdir/cert.txt"
+      if [ -s "$cert_file" ]; then
+        while IFS= read -r nm; do
+          add_candidate "$nm" "$IP"
+        done < <(grep -oiE "DNS:$DOMAIN_RE" "$cert_file" 2>/dev/null \
+                 | sed -E 's/^DNS://I' \
+                 | sort -u)
       fi
-    done < <(sort -u "$email_domains_file")
+
+    done < <(find "$HTTP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)
+  else
+    [ "$VERBOSE" -eq 1 ] && echo "[info] no HTTP artifacts under $HTTP_ROOT" >&2
+  fi
+
+  # --- 3) harvest domains from http-collected emails and verify via Host header ---
+  if [ -n "${PORTS_ARG:-}" ]; then
+    email_domains_file="$(mktemp)"
+    trap 'rm -f "$email_domains_file"' EXIT
+
+    # web artifacts now live under OUTDIR/report/http
+    while IFS= read -r ef; do
+      [ -s "$ef" ] || continue
+      awk -F'@' '{if (NF>=2) print $NF}' "$ef" \
+        | tr 'A-Z' 'a-z' \
+        | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+        >> "$email_domains_file"
+    done < <(find "$HTTP_ROOT" -maxdepth 2 -type f -name 'emails.txt' 2>/dev/null || true)
+
+    if [ -s "$email_domains_file" ]; then
+      echo -e "${yellow}[*] [add-hosts]:${end} ${purple}Verifying email-derived domains via HTTP on ports ${PORTS_ARG}...${end}"
+      while IFS= read -r dom; do
+        [[ -z "$dom" ]] && continue
+        dom="${dom%.}"  # strip trailing dot
+
+        # case-insensitive check against existing hosts
+        lc_dom="${dom,,}"
+        if [[ -n "${host_ips[$lc_dom]+x}" ]]; then
+          [ "$VERBOSE" -eq 1 ] && echo "[skip] $dom (already accepted earlier)" >&2
+          continue
+        fi
+
+        verified_hit=0
+        for p in $(echo "$PORTS_ARG" | tr ',' ' '); do
+          p="${p//[^0-9]/}"; [ -z "$p" ] && continue
+          if curl -sI --max-time 4 -H "Host: $dom" "http://$IP:$p/" \
+            | head -n1 \
+            | grep -qE 'HTTP/[0-9.]+\ [12][0-9]{2}|HTTP/[0-9.]+\ 3[0-9]{2}'; then
+            verified_hit=1
+            break
+          fi
+        done
+        if [ "$verified_hit" -eq 1 ]; then
+          add_candidate "$dom" "$IP"
+        fi
+      done < <(sort -u "$email_domains_file")
+    fi
   fi
 fi
-# --- end email-domain verification ---
 
-[ "${#map[@]}" -eq 0 ] && exit 0
+# --- final application to /etc/hosts ---
 
-for name in "${!map[@]}"; do
-  ip="${map[$name]}"
+if [ "${#host_ips[@]}" -eq 0 ]; then
+  echo -e "${yellow}[*] [add-hosts]: No hosts need to be added to /etc/hosts.${end}"
+  exit 0
+fi
+
+echo -e "${yellow}[*] [add-hosts]:${end} ${purple}${#host_ips[@]} unique host(s) to ensure in /etc/hosts...${end}"
+
+for lc in "${!host_ips[@]}"; do
+  ip="${host_ips[$lc]}"
+  name="${host_canon[$lc]}"
+
   [[ "$name" =~ ^(localhost|ip6-localhost|ip6-loopback)$ ]] && continue
   [[ "$name" == "$ip" ]] && continue   # skip IP → IP noise
 
   if upsert_host_entry "$ip" "$name"; then
-    [ "$DRY_RUN" -eq 0 ] && echo -e "${yellow}  [!]${end} ${blue}Ensured ${name} → ${ip}${end}"
+    [ "${DRY_RUN:-0}" -eq 0 ] && echo -e "${yellow}  [-]${end} ${blue}Ensured ${name} → ${ip}${end}"
   else
     echo -e "${red}ERROR: failed to upsert '${name}' into /etc/hosts (sudo?)${end}" >&2
     exit 1
   fi
 done
+
+# Summary based on actual changes to /etc/hosts
+if [ "$NEW_HOSTS_ADDED" -eq 0 ]; then
+  echo -e "${yellow}[*] [add-hosts]: No new hosts needed to be added to /etc/hosts.${end}"
+fi
 
 exit 0

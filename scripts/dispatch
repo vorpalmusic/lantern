@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+## dispatch
+
+### GRAB ROOTDIR AND PATH VARS
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
 
 OUTDIR="${1:-}"
 TARGET="${2:-}"
@@ -9,17 +13,6 @@ PORTS="${4:-}"          # comma-separated list from allPorts
 if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
   echo "[!] dispatch: Usage: dispatch OUTDIR TARGET [TARGETED_XML] [PORTS]" >&2
   exit 2
-fi
-
-# Resolve ROOTDIR based on this script being in $ROOTDIR/scripts
-ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/.. >/dev/null 2>&1 && pwd)"
-
-# Colors if available
-if [ -f "$ROOTDIR/lib/colors" ]; then
-  # shellcheck source=/dev/null
-  . "$ROOTDIR/lib/colors"
-else
-  yellow=""; purple=""; blue=""; end=""
 fi
 
 SSH_MASTER="$ROOTDIR/modules/ssh/ssh-master"
@@ -129,9 +122,8 @@ fi
 
 # --- Run Treasure aggregation (cheap, after all modules) ---
 if [ -x "$TREASURE" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Aggregating treasure...${end}"
+  echo -e "${yellow}[*]${end} ${purple}Treasure Goblin deployed...${end}"
   "$TREASURE" "$OUTDIR"
-  echo -e "${yellow}[*]${end} ${purple}Treasure complete.${end}"
 fi
 
 exit 0

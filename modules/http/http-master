@@ -80,18 +80,14 @@ rm -f "$emails_tmp"
 # --- Domains enrichment ---
 target_hint="${HTTP_CAND:-$TARGET}"
 found_hosts="$("$MODDIR/http/enrich" "$OUTDIR" "$target_hint" --max 200)"
-echo -e "${yellow}[*]${end} ${purple}Domains found:${end}"
+echo -e "${yellow}[*]${end} ${purple}Domains found in the web pages:${end}"
 echo "$found_hosts" | sed '/^$/d' | while IFS= read -r h; do
   echo -e "   ${blue}$h${end}"
 done
 
-# --- /etc/hosts additions (denylist-aware) ---
-added="$(sudo bash "$ROOTDIR/scripts/add-hosts" "$OUTDIR" "$TARGET" "${HTTP_VERIFIED:-}" --deny-file "$LISTDIR/deny-domains" 2>/dev/null || true)"
-if [ -n "$added" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Hosts added to /etc/hosts:${end}"
-  echo "$added"
-else
-  echo -e "${yellow}  [!] No new /etc/hosts entries needed.${end}"
-fi
+added="$(sudo bash "$ROOTDIR/scripts/add-hosts" \
+  "$OUTDIR" "$TARGET" "${HTTP_VERIFIED:-}" --verbose \
+  --mode http \
+  --deny-file "$LISTDIR/deny-domains" 2>/dev/null || true)"
 
 exit 0

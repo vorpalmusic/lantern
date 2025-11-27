@@ -1,7 +1,7 @@
 #!/bin/bash
 ## lantern
 # author: JackDaw
-version="v0.0.16"
+version="v0.0.17"
 
 ### GRAB ROOTDIR AND PATH VARS
 rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
@@ -21,6 +21,10 @@ if [ "$depcheck" -eq 0 ]; then
   [ -f "$CONFIG" ] && . "$CONFIG"
   depcheck="${depcheck:-0}"
 fi
+
+# -----------
+# Input flags and validation
+# ----------
 
 # Do NOT allow running Lantern as root; use regular user + internal sudo
 if [ "$EUID" -eq 0 ]; then
@@ -66,6 +70,10 @@ target="$1"
 BASEDIR="$(pwd)"
 OUTDIR="${BASEDIR}/${target}"
 REPORTDIR="${OUTDIR}/report"
+
+## DISCLAIMER
+echo -e "${yellow}[!] LANTERN is intended for${end} ${red}ETHICAL hacking only.${end}"
+echo -e "${yellow}[!] Please do not use it to break the law.${end}"
 
 ## HANDLE PRIVILEGES (for nmap SYN scans only)
 echo -e "${yellow}[*]${end} ${purple}Lantern needs elevated privileges ONLY for certain tasks. The rest of the commands are run as normal user.${end}"
@@ -164,12 +172,23 @@ fi
 TARGETED_XML="$REPORTDIR/targetedXML"
 
 if [ -n "$ports" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Targeted scanning on discovered ports...results will populate web report.${end}"
+  echo -e "${yellow}[*]${end} ${purple}Targeted scanning on discovered ports...if there are many, this could take a while.${end}" 
+  echo -e "${purple}    Results will populate the web report.${end}"
   sudo /usr/bin/nmap -sCV -p"$ports" -n -Pn --max-retries 2 --host-timeout 120s "$target" \
        -oX "$TARGETED_XML" >/dev/null 2>&1
 else
-  echo -e "${yellow}[!]${end} ${purple}No open ports detected; skipping targeted scan.${end}"
+  echo -e "${yellow}[!] No open ports detected; skipping targeted scan.${end}"
 fi
+
+echo $IP
+
+## add-hosts runs to discover any possible domains in the nmap output
+sudo bash "$ROOTDIR/scripts/add-hosts" \
+  "$OUTDIR" \
+  "$target" \
+  "" \
+  --deny-file "$LISTDIR/deny-domains" \
+  --mode nmap
 
 # --- service dispatch (SSH / HTTP / HTTP-CMS, etc.) ---
 "$ROOTDIR/scripts/dispatch" "$OUTDIR" "$target" "$TARGETED_XML" "$ports" || true
