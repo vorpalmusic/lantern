@@ -85,9 +85,14 @@ echo "$found_hosts" | sed '/^$/d' | while IFS= read -r h; do
   echo -e "   ${blue}$h${end}"
 done
 
-added="$(sudo bash "$ROOTDIR/scripts/add-hosts" \
-  "$OUTDIR" "$TARGET" "${HTTP_VERIFIED:-}" --verbose \
-  --mode http \
-  --deny-file "$LISTDIR/deny-domains" 2>/dev/null || true)"
+if [ -n "${HTTP_VERIFIED:-}" ]; then
+  sudo "$ROOTDIR/scripts/add-hosts" \
+    "$OUTDIR" \
+    "$TARGET" \
+    "${HTTP_VERIFIED:-}" \
+    --mode http \
+    --deny-file "$LISTDIR/deny-domains" \
+    --verbose || true
+fi
 
 exit 0

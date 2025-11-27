@@ -24,12 +24,8 @@ upsert_host_entry() {
     return 0
   fi
 
-  # Fast path: if this "ip host" pair already exists, skip the heavy awk/tee.
-  # Still regex-based, but a bit stricter about word boundaries.
+  # Fast path: if this exact "ip host" pair already exists, skip heavy rewrite.
   if grep -qiE "^[[:space:]]*$ip[[:space:]]+([^#]*[[:space:]])?${host}([[:space:]]|#|$)" /etc/hosts 2>/dev/null; then
-    if [ "${DRY_RUN:-0}" -eq 1 ]; then
-      echo "[dry-run] already present ${host} → ${ip}"
-    fi
     return 0
   fi
 
@@ -48,8 +44,8 @@ upsert_host_entry() {
     }
 
     N = 0
-    host_line = 0
-    ip_line = 0
+    host_line = 0   # first line where host appears
+    ip_line   = 0   # first line where IP equals target_ip
   }
 
   # Parse and store all lines for a second-phase decision
@@ -59,7 +55,6 @@ upsert_host_entry() {
     N++
     raw[N] = orig
 
-    # default: passthrough line
     afters[N] = ""
 
     # Comments / blanks
@@ -75,7 +70,7 @@ upsert_host_entry() {
     i0 = 1; while (i0 <= n && f[i0] == "") i0++
     if (i0 > n) next
 
-    # first token is IP; store
+    # first token is IP
     ips[N] = f[i0]
 
     # collect names (preserve order & original case)
@@ -87,18 +82,18 @@ upsert_host_entry() {
       if (!(key in seen)) {
         seen[key] = 1
         k++
-        order[k] = f[i]
+        order[k]    = f[i]
         order_lc[k] = key
       }
     }
     counts[N] = k
-    for (i = 1; i <= k; i++) names[N, i]     = order[i]
-    for (i = 1; i <= k; i++) names_lc[N, i]  = order_lc[i]
+    for (i = 1; i <= k; i++) names[N, i]    = order[i]
+    for (i = 1; i <= k; i++) names_lc[N, i] = order_lc[i]
 
-    # Did we see the target host on this line?
+    # Did we see the target host on this line (case-insensitive)?
     for (i = 1; i <= k; i++) {
-      if (names_lc[N, i] == th) {
-        if (host_line == 0) host_line = N
+      if (names_lc[N, i] == th && host_line == 0) {
+        host_line = N
       }
     }
 
@@ -107,15 +102,21 @@ upsert_host_entry() {
   }
 
   END{
-    # CASE A: host already exists somewhere → update that line to target_ip (keep aliases, add extras)
+    # CASE A: host already exists somewhere → update that line to target_ip
+    # (fixes wrong-IP mapping while preserving aliases + inline comment)
     if (host_line > 0) {
       for (i = 1; i <= N; i++) {
         if (i == host_line) {
-          delete seen; for (j = 1; j <= counts[i]; j++) { key = tolower(names[i, j]); sub(/\.$/, "", key); seen[key] = 1 }
+          delete seen
+          for (j = 1; j <= counts[i]; j++) {
+            key = tolower(names[i, j]); sub(/\.$/, "", key)
+            seen[key] = 1
+          }
 
           printf "%s", target_ip
           for (j = 1; j <= counts[i]; j++) printf " %s", names[i, j]
 
+          # add requested aliases if not already present
           for (k in want) if (!(k in seen)) printf " %s", want[k]
 
           if (afters[i] != "") printf " %s", afters[i]
@@ -127,18 +128,24 @@ upsert_host_entry() {
       exit 0
     }
 
-    # CASE B: host not present; there is a line with the same IP → add host (and extras) to that line
+    # CASE B: host not present; there is a line with the same IP → add host (and extras)
     if (ip_line > 0) {
       for (i = 1; i <= N; i++) {
         if (i == ip_line) {
-          delete seen; for (j = 1; j <= counts[i]; j++) { key = tolower(names[i, j]); sub(/\.$/, "", key); seen[key] = 1 }
+          delete seen
+          for (j = 1; j <= counts[i]; j++) {
+            key = tolower(names[i, j]); sub(/\.$/, "", key)
+            seen[key] = 1
+          }
 
           printf "%s", ips[i]
           for (j = 1; j <= counts[i]; j++) printf " %s", names[i, j]
 
+          # ensure target_host itself is present
           if (!(th in seen)) printf " %s", target_host
           seen[th] = 1
 
+          # append extras (if not present)
           for (k in want) if (!(k in seen)) printf " %s", want[k]
 
           if (afters[i] != "") printf " %s", afters[i]
@@ -150,7 +157,7 @@ upsert_host_entry() {
       exit 0
     }
 
-    # CASE C: no host, no same-IP line → append a new line at EOF
+    # CASE C: no host, no same-IP line → append new line at EOF
     for (i = 1; i <= N; i++) print raw[i]
     printf "%s %s", target_ip, target_host
     for (k in want) printf " %s", want[k]
@@ -158,7 +165,7 @@ upsert_host_entry() {
   }
   ' /etc/hosts | sudo tee /etc/hosts >/dev/null || return 1
 
-  # If we got here, /etc/hosts was actually rewritten
+  # If we got here, /etc/hosts was actually rewritten at least once
   NEW_HOSTS_ADDED=$((NEW_HOSTS_ADDED+1))
 }
 
@@ -170,7 +177,6 @@ fi
 OUTDIR="$1"; IP="$2"
 PORTS_ARG=""
 
-# shift off OUTDIR/IP; leave PORTS (if any) and flags
 shift 2
 
 # defaults (can be overridden via env or flags)
@@ -179,9 +185,6 @@ shift 2
 ALLOW_REGEX=""
 MODE="all"
 
-# default deny file:
-#   script location: lantern/scripts/add-hosts
-#   deny list:       lantern/lists/deny-domains
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 DENY_FILE_DEFAULT="$SCRIPT_DIR/../lists/deny-domains"
 DENY_FILE="${ADD_HOSTS_DENY:-$DENY_FILE_DEFAULT}"
@@ -210,11 +213,9 @@ while [ "$#" -gt 0 ]; do
       MODE="${1:-all}"   # nmap | http | all
       ;;
     --*)
-      # unknown flag; just stash it
       ARGS+=("$1")
       ;;
     *)
-      # first non-flag after OUTDIR/IP is ports if not already set
       if [ -z "$PORTS_ARG" ]; then
         PORTS_ARG="$1"
       else
@@ -257,15 +258,11 @@ is_denied() {
   return 1
 }
 
-# We keep a case-insensitive map:
-#   lc_host -> IP
-# and a canonical display name:
-#   lc_host -> first-seen original-case host
+# case-insensitive maps:
 declare -A host_ips=()    # lc_host -> ip
 declare -A host_canon=()  # lc_host -> original-case host
 NEW_HOSTS_ADDED=0         # count of actual writes to /etc/hosts this run
 
-# Add one candidate hostname → host_ips/host_canon after all filters
 add_candidate() {
   local nm="$1"
   local ip="$2"
@@ -278,9 +275,7 @@ add_candidate() {
     return 0
   fi
 
-  # normalized lowercase key
-  local lc
-  lc="${nm,,}"
+  local lc="${nm,,}"
 
   # trivial local exclusions
   if [[ "$lc" =~ ^(localhost|ip6-localhost|ip6-loopback)$ ]]; then
@@ -306,7 +301,6 @@ add_candidate() {
   fi
 }
 
-# generic: scan a file for DOMAIN_RE tokens and add them
 scan_file_for_domains() {
   local file="$1"
   local ip="$2"
@@ -317,9 +311,7 @@ scan_file_for_domains() {
   done < <(grep -oE "$DOMAIN_RE" "$file" 2>/dev/null | sort -u)
 }
 
-# ---------- 1) Extract FQDNs from Nmap XML (only if mode includes nmap) ----------
-# Assumption: targetedXML is per-host, so every domain-like token belongs to $IP.
-
+# ---------- 1) Extract FQDNs from Nmap XML (mode nmap/all) ----------
 if [[ "$MODE" == "all" || "$MODE" == "nmap" ]]; then
   if [ -s "$xml" ]; then
     echo -e "${yellow}[*] [add-hosts]:${end} ${purple}Extracting hostnames from Nmap XML...${end}"
@@ -332,23 +324,17 @@ if [[ "$MODE" == "all" || "$MODE" == "nmap" ]]; then
   fi
 fi
 
-# ---------- 2) Harvest domains from HTTP artifacts under OUTDIR/report/http (mode http/all) ----------
-
+# ---------- 2) Harvest domains from HTTP artifacts (mode http/all) ----------
 HTTP_ROOT="$OUTDIR/report/http"
 if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
   if [ -d "$HTTP_ROOT" ]; then
     echo -e "${yellow}[*] [add-hosts]:${end} ${purple}Harvesting hostnames from HTTP artifacts...${end}"
-    # Each port has its own dir: OUTDIR/report/http/<port>/
     while IFS= read -r portdir; do
       [ -d "$portdir" ] || continue
 
-      # 2a) Headers (Location:, etc.)
       scan_file_for_domains "$portdir/headers.txt" "$IP"
-
-      # 2b) Hosts extracted from body (hosts_from_body.txt)
       scan_file_for_domains "$portdir/hosts_from_body.txt" "$IP"
 
-      # 2c) Certificate SANs from cert.txt (DNS: entries)
       cert_file="$portdir/cert.txt"
       if [ -s "$cert_file" ]; then
         while IFS= read -r nm; do
@@ -368,7 +354,6 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
     email_domains_file="$(mktemp)"
     trap 'rm -f "$email_domains_file"' EXIT
 
-    # web artifacts now live under OUTDIR/report/http
     while IFS= read -r ef; do
       [ -s "$ef" ] || continue
       awk -F'@' '{if (NF>=2) print $NF}' "$ef" \
@@ -381,9 +366,8 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
       echo -e "${yellow}[*] [add-hosts]:${end} ${purple}Verifying email-derived domains via HTTP on ports ${PORTS_ARG}...${end}"
       while IFS= read -r dom; do
         [[ -z "$dom" ]] && continue
-        dom="${dom%.}"  # strip trailing dot
+        dom="${dom%.}"
 
-        # case-insensitive check against existing hosts
         lc_dom="${dom,,}"
         if [[ -n "${host_ips[$lc_dom]+x}" ]]; then
           [ "$VERBOSE" -eq 1 ] && echo "[skip] $dom (already accepted earlier)" >&2
@@ -395,7 +379,7 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
           p="${p//[^0-9]/}"; [ -z "$p" ] && continue
           if curl -sI --max-time 4 -H "Host: $dom" "http://$IP:$p/" \
             | head -n1 \
-            | grep -qE 'HTTP/[0-9.]+\ [12][0-9]{2}|HTTP/[0-9.]+\ 3[0-9]{2}'; then
+            | grep -qE "HTTP/[0-9.]+\ [12][0-9]{2}|HTTP/[0-9.]+\ 3[0-9]{2}"; then
             verified_hit=1
             break
           fi
@@ -409,32 +393,37 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
 fi
 
 # --- final application to /etc/hosts ---
+CANDIDATE_COUNT=${#host_ips[@]}
 
-if [ "${#host_ips[@]}" -eq 0 ]; then
-  echo -e "${yellow}[*] [add-hosts]: No hosts need to be added to /etc/hosts.${end}"
+if [ "$CANDIDATE_COUNT" -eq 0 ]; then
+  echo -e "${yellow}[*] [add-hosts]:${end} ${purple}No hostname candidates discovered (mode: $MODE). /etc/hosts unchanged.${end}"
   exit 0
 fi
 
-echo -e "${yellow}[*] [add-hosts]:${end} ${purple}${#host_ips[@]} unique host(s) to ensure in /etc/hosts...${end}"
+echo -e "${yellow}[*] [add-hosts]:${end} ${purple}${CANDIDATE_COUNT} unique host(s) to ensure in /etc/hosts (mode: $MODE)...${end}"
 
 for lc in "${!host_ips[@]}"; do
   ip="${host_ips[$lc]}"
   name="${host_canon[$lc]}"
 
   [[ "$name" =~ ^(localhost|ip6-localhost|ip6-loopback)$ ]] && continue
-  [[ "$name" == "$ip" ]] && continue   # skip IP → IP noise
+  [[ "$name" == "$ip" ]] && continue
 
   if upsert_host_entry "$ip" "$name"; then
-    [ "${DRY_RUN:-0}" -eq 0 ] && echo -e "${yellow}  [-]${end} ${blue}Ensured ${name} → ${ip}${end}"
+    if [ "${DRY_RUN:-0}" -eq 0 ]; then
+      echo -e "${yellow}  [-]${end} ${blue}Ensured ${name} → ${ip}${end}"
+    fi
   else
     echo -e "${red}ERROR: failed to upsert '${name}' into /etc/hosts (sudo?)${end}" >&2
     exit 1
   fi
 done
 
-# Summary based on actual changes to /etc/hosts
-if [ "$NEW_HOSTS_ADDED" -eq 0 ]; then
-  echo -e "${yellow}[*] [add-hosts]: No new hosts needed to be added to /etc/hosts.${end}"
+# Final summary for this invocation
+if [ "$NEW_HOSTS_ADDED" -gt 0 ]; then
+  echo -e "${yellow}[*] [add-hosts]:${end} ${green}Updated /etc/hosts with ${NEW_HOSTS_ADDED} entr(ies).${end}"
+else
+  echo -e "${yellow}[*] [add-hosts]:${end} ${purple}/etc/hosts already up-to-date for discovered hostnames.${end}"
 fi
 
 exit 0
