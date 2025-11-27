@@ -251,6 +251,192 @@ build_ftp_fragment() {
   done
 }
 
+# ---------------- DNS summary fragment (08-dns.html) ----------------
+build_dns_fragment() {
+  local frag="$FRAGDIR/08-dns.html"
+
+  if [ ! -d "$OUTDIR/dns" ]; then
+    return 0
+  fi
+
+  local ports=()
+  mapfile -t ports < <(find "$OUTDIR/dns" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n)
+  [ ${#ports[@]} -eq 0 ] && return 0
+
+  : > "$frag"
+  echo "<h3>DNS Summary</h3>" >> "$frag"
+
+  local port portdir
+  for port in "${ports[@]}"; do
+    portdir="$OUTDIR/dns/$port"
+    [ -d "$portdir" ] || continue
+
+    local domain ns_count
+    domain=""
+    ns_count="0"
+
+    if [ -s "$portdir/summary.txt" ]; then
+      domain="$(grep -m1 '^Domain guess:' "$portdir/summary.txt" | sed 's/.*Domain guess:[[:space:]]*//')"
+      ns_count="$(grep -m1 '^NS count:' "$portdir/summary.txt" | sed 's/.*NS count:[[:space:]]*//')"
+    fi
+
+    local esc_domain
+    esc_domain="$(printf '%s' "$domain" | html_escape)"
+
+    local link_items=()
+    link_items+=("$(make_link_if 'summary.txt'       "dns/$port/summary.txt")")
+    link_items+=("$(make_link_if 'records.txt'       "dns/$port/records.txt" allow_empty)")
+    link_items+=("$(make_link_if 'ns.txt'            "dns/$port/ns.txt" allow_empty)")
+    link_items+=("$(make_link_if 'reverse.txt'       "dns/$port/reverse.txt" allow_empty)")
+    link_items+=("$(make_link_if 'zone-transfer.txt' "dns/$port/zone-transfer.txt" allow_empty)")
+    link_items+=("$(make_link_if 'dnsenum.txt'       "dns/$port/dnsenum.txt" allow_empty)")
+
+    local links
+    links="$(emit_links "${link_items[@]}")"
+
+    {
+      echo "<div class=\"lantern-port\">"
+      echo "  <h4>Port <code>$port</code> — DNS</h4>"
+      echo "  <div class=\"lantern-meta\">"
+      if [ -n "$esc_domain" ]; then
+        echo "    <strong>Domain guess:</strong> $esc_domain &nbsp;•&nbsp; <strong>NS count:</strong> ${ns_count:-0}"
+      else
+        echo "    <strong>Domain guess:</strong> <em>none</em> &nbsp;•&nbsp; <strong>NS count:</strong> ${ns_count:-0}"
+      fi
+      echo "  </div>"
+      echo "  <div class=\"lantern-files\">${links:-<em>No DNS artifacts.</em>}</div>"
+    } >> "$frag"
+
+    # Inline DNS summary preview (two-column, open by default)
+    if [ -s "$portdir/summary.txt" ]; then
+      echo "  <details open style=\"margin-top:.4rem\"><summary>DNS Summary Preview</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
+      sed -n '1,300p' "$portdir/summary.txt" | html_escape >> "$frag"
+      echo "  </pre></details>" >> "$frag"
+    fi
+
+    echo "</div>" >> "$frag"
+  done
+}
+
+# ---------------- LDAP summary fragment (09-ldap.html) ----------------
+build_ldap_fragment() {
+  local frag="$FRAGDIR/09-ldap.html"
+
+  if [ ! -d "$OUTDIR/ldap" ]; then
+    return 0
+  fi
+
+  local ports=()
+  mapfile -t ports < <(find "$OUTDIR/ldap" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n)
+  [ ${#ports[@]} -eq 0 ] && return 0
+
+  : > "$frag"
+  echo "<h3>LDAP Summary</h3>" >> "$frag"
+
+  local port portdir
+  for port in "${ports[@]}"; do
+    portdir="$OUTDIR/ldap/$port"
+    [ -d "$portdir" ] || continue
+
+    local domain_dn forest_dn anon_bind is_ad
+    domain_dn=""
+    forest_dn=""
+    anon_bind=""
+    is_ad=""
+
+    if [ -s "$portdir/summary.txt" ]; then
+      domain_dn="$(grep -m1 '^Domain DN:' "$portdir/summary.txt" 2>/dev/null | sed 's/.*Domain DN:[[:space:]]*//')"
+      forest_dn="$(grep -m1 '^Forest DN:' "$portdir/summary.txt" 2>/dev/null | sed 's/.*Forest DN:[[:space:]]*//')"
+      anon_bind="$(grep -m1 '^Anonymous bind:' "$portdir/summary.txt" 2>/dev/null | sed 's/.*Anonymous bind:[[:space:]]*//')"
+      is_ad="$(grep -m1 '^Is Active Directory:' "$portdir/summary.txt" 2>/dev/null | sed 's/.*Is Active Directory:[[:space:]]*//')"
+    fi
+
+    local esc_domain_dn esc_forest_dn esc_anon_bind esc_is_ad
+    esc_domain_dn="$(printf '%s' "$domain_dn" | html_escape)"
+    esc_forest_dn="$(printf '%s' "$forest_dn" | html_escape)"
+    esc_anon_bind="$(printf '%s' "$anon_bind" | html_escape)"
+    esc_is_ad="$(printf '%s' "$is_ad" | html_escape)"
+
+    local link_items=()
+    link_items+=("$(make_link_if 'summary.txt'      "ldap/$port/summary.txt")")
+    link_items+=("$(make_link_if 'rootdse.txt'      "ldap/$port/rootdse.txt" allow_empty)")
+    link_items+=("$(make_link_if 'base.txt'         "ldap/$port/base.txt" allow_empty)")
+    link_items+=("$(make_link_if 'anon-search.txt'  "ldap/$port/anon-search.txt" allow_empty)")
+    link_items+=("$(make_link_if 'users.txt'        "ldap/$port/users.txt" allow_empty)")
+    link_items+=("$(make_link_if 'groups.txt'       "ldap/$port/groups.txt" allow_empty)")
+    link_items+=("$(make_link_if 'computers.txt'    "ldap/$port/computers.txt" allow_empty)")
+    link_items+=("$(make_link_if 'domain-info.txt'  "ldap/$port/domain-info.txt" allow_empty)")
+    link_items+=("$(make_link_if 'schema.txt'       "ldap/$port/schema.txt" allow_empty)")
+
+    # Any extra LDAP artifacts
+    shopt -s nullglob
+    local fpath fbn rel
+    for fpath in "$portdir"/*; do
+      [ -f "$fpath" ] || continue
+      fbn="$(basename "$fpath")"
+      case "$fbn" in
+        summary.txt|rootdse.txt|base.txt|anon-search.txt|users.txt|groups.txt|computers.txt|domain-info.txt|schema.txt)
+          continue
+          ;;
+      esac
+      rel="ldap/$port/$fbn"
+      link_items+=("$(make_link_if "$fbn" "$rel" allow_empty)")
+    done
+    shopt -u nullglob
+
+    local links
+    links="$(emit_links "${link_items[@]}")"
+
+    {
+      echo "<div class=\"lantern-port\">"
+      echo "  <h4>Port <code>$port</code> — LDAP</h4>"
+      echo "  <div class=\"lantern-meta\">"
+      if [ -n "$esc_domain_dn" ]; then
+        echo "    <strong>Domain DN:</strong> $esc_domain_dn"
+      fi
+      if [ -n "$esc_forest_dn" ]; then
+        echo " &nbsp;•&nbsp; <strong>Forest DN:</strong> $esc_forest_dn"
+      fi
+      if [ -n "$esc_anon_bind" ]; then
+        echo " &nbsp;•&nbsp; <strong>Anonymous bind:</strong> $esc_anon_bind"
+      fi
+      if [ -n "$esc_is_ad" ]; then
+        echo " &nbsp;•&nbsp; <strong>Active Directory:</strong> $esc_is_ad"
+      fi
+      echo "  </div>"
+      echo "  <div class=\"lantern-files\">${links:-<em>No LDAP artifacts.</em>}</div>"
+    } >> "$frag"
+
+    # Juicy preview: summary + anon-search/users if present, open by default
+    if [ -s "$portdir/summary.txt" ] || [ -s "$portdir/anon-search.txt" ] || [ -s "$portdir/users.txt" ]; then
+      echo "  <details open style=\"margin-top:.4rem\"><summary>LDAP Enumeration Preview</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
+
+      if [ -s "$portdir/summary.txt" ]; then
+        echo "---- summary.txt ----" | html_escape >> "$frag"
+        printf '\n' >> "$frag"
+        sed -n '1,200p' "$portdir/summary.txt" | html_escape >> "$frag"
+        printf '\n\n' >> "$frag"
+      fi
+
+      if [ -s "$portdir/anon-search.txt" ]; then
+        echo "---- anon-search.txt ----" | html_escape >> "$frag"
+        printf '\n' >> "$frag"
+        sed -n '1,200p' "$portdir/anon-search.txt" | html_escape >> "$frag"
+        printf '\n\n' >> "$frag"
+      elif [ -s "$portdir/users.txt" ]; then
+        echo "---- users.txt ----" | html_escape >> "$frag"
+        printf '\n' >> "$frag"
+        sed -n '1,200p' "$portdir/users.txt" | html_escape >> "$frag"
+        printf '\n\n' >> "$frag"
+      fi
+
+      echo "  </pre></details>" >> "$frag"
+    fi
+
+    echo "</div>" >> "$frag"
+  done
+}
+
 # ---------------- HTTP summary fragment (10-http.html) ----------------
 build_http_fragment() {
   local frag="$FRAGDIR/10-http.html"
@@ -470,6 +656,8 @@ HEAD
 
 build_ssh_fragment
 build_ftp_fragment
+build_dns_fragment
+build_ldap_fragment
 build_http_fragment
 build_cms_fragment
 

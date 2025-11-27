@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+## http-master
 
 OUTDIR="${1:-}"
 TARGET="${2:-}"
@@ -34,7 +34,11 @@ echo -e "${yellow}[*]${end} ${purple}Verified HTTP ports:${end} ${blue}${HTTP_VE
 VERIFIED_FILE="$OUTDIR/http/verified-ports.txt"
 : > "$VERIFIED_FILE"
 if [ -n "${HTTP_VERIFIED:-}" ]; then
-  echo "$HTTP_VERIFIED" | tr ',' '\n' | sed 's/[^0-9]//g' | sed '/^$/d' | sort -n -u > "$VERIFIED_FILE"
+  echo "$HTTP_VERIFIED" \
+    | tr ',' '\n' \
+    | sed 's/[^0-9]//g' \
+    | sed '/^$/d' \
+    | sort -n -u > "$VERIFIED_FILE"
 fi
 
 # --- HTTP collect per verified port (run in parallel) ---
@@ -78,13 +82,22 @@ fi
 rm -f "$emails_tmp"
 
 # --- Domains enrichment ---
-target_hint="${HTTP_CAND:-$TARGET}"
-found_hosts="$("$MODDIR/http/enrich" "$OUTDIR" "$target_hint" --max 200)"
-echo -e "${yellow}[*]${end} ${purple}Domains found in the web pages:${end}"
-echo "$found_hosts" | sed '/^$/d' | while IFS= read -r h; do
-  echo -e "   ${blue}$h${end}"
-done
+# Use the actual target (IP/hostname) as the seed; http/enrich reads all HTTP artifacts
+# under \$OUTDIR/http and aggregates hostnames. We don't care if it exits non-zero.
+found_hosts="$("$MODDIR/http/enrich" "$OUTDIR" "$TARGET" --max 200 || true)"
 
+echo -e "${yellow}[*]${end} ${purple}Domains found in the web pages:${end}"
+if [ -n "$found_hosts" ]; then
+  printf '%s\n' "$found_hosts" \
+    | sed '/^$/d' \
+    | while IFS= read -r h; do
+        echo -e "   ${blue}$h${end}"
+      done
+else
+  echo -e "   ${blue}<none>${end}"
+fi
+
+# --- Add discovered hosts into /etc/hosts via add-hosts (HTTP mode) ---
 if [ -n "${HTTP_VERIFIED:-}" ]; then
   sudo "$ROOTDIR/scripts/add-hosts" \
     "$OUTDIR" \

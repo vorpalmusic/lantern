@@ -7,7 +7,7 @@ ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." >/de
 
 OUTDIR="${1:-}"
 TARGET="${2:-}"
-TARGETED_XML="${3:-}"   # nmap -sCV XML (may be empty/in-progress)
+TARGETED_XML="${3:-}"   # nmap -sCV XML (may be empty/in-progress, passed to modules that want it)
 PORTS="${4:-}"          # comma-separated list from allPorts
 
 if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
@@ -19,14 +19,24 @@ SSH_MASTER="$ROOTDIR/modules/ssh/ssh-master"
 HTTP_MASTER="$ROOTDIR/modules/http/http-master"
 HTTP_CMS_MASTER="$ROOTDIR/modules/http/http-cms"
 FTP_MASTER="$ROOTDIR/modules/ftp/ftp-master"
+DNS_MASTER="$ROOTDIR/modules/dns/dns-master"
+LDAP_MASTER="$ROOTDIR/modules/ldap/ldap-master"
 TREASURE="$ROOTDIR/scripts/treasure"
 
 has_ssh=false
 has_http=false
 has_ftp=false
+has_dns=false
+has_ldap=false
 
 # crude single ftp port tracking (most boxes: 21)
 ftp_port=""
+
+# track DNS ports (e.g., 53, 853)
+dns_ports=()
+
+# track LDAP ports (389, 636, 3268, 3269)
+ldap_ports=()
 
 # --- Service detection from ports (fast, doesn't depend on XML) ---
 if [ -n "${PORTS:-}" ]; then
@@ -35,19 +45,43 @@ if [ -n "${PORTS:-}" ]; then
     p="${p//[^0-9]/}"
     [ -z "$p" ] && continue
 
+    # SSH
     [ "$p" = "22" ] && has_ssh=true
+
+    # HTTP-ish
     case "$p" in
-      80|443|8080|8443) has_http=true ;;
+      80|443|8080|8443)
+        has_http=true
+        ;;
     esac
 
+    # FTP (single port tracked for now)
     if [ "$p" = "21" ]; then
       has_ftp=true
       ftp_port="21"
     fi
+
+    # DNS
+    case "$p" in
+      53|853)
+        has_dns=true
+        dns_ports+=("$p")
+        ;;
+    esac
+
+    # LDAP (and GC / SSL variants)
+    case "$p" in
+      389|636|3268|3269)
+        has_ldap=true
+        ldap_ports+=("$p")
+        ;;
+    esac
   done
 fi
 
 # Optional refinement from XML, if it is already present and non-empty
+# NOTE: we DO NOT use XML to "discover" DNS or LDAP. If those exist, they must
+# be surfaced via PORTS. XML is only used where it already was (SSH/HTTP/FTP).
 if [ -n "${TARGETED_XML:-}" ] && [ -s "$TARGETED_XML" ]; then
   if grep -qi 'service name="ssh"' "$TARGETED_XML";   then has_ssh=true;  fi
   if grep -qi 'service name="http"' "$TARGETED_XML";  then has_http=true; fi
@@ -64,6 +98,18 @@ if [ -n "${TARGETED_XML:-}" ] && [ -s "$TARGETED_XML" ]; then
   fi
 fi
 
+# Join DNS ports (if any) into a comma-separated string for dns-master
+dns_ports_str=""
+if [ "${#dns_ports[@]}" -gt 0 ]; then
+  dns_ports_str="$(IFS=','; echo "${dns_ports[*]}")"
+fi
+
+# Join LDAP ports (if any) into a comma-separated string for ldap-master
+ldap_ports_str=""
+if [ "${#ldap_ports[@]}" -gt 0 ]; then
+  ldap_ports_str="$(IFS=','; echo "${ldap_ports[*]}")"
+fi
+
 LOGDIR="$OUTDIR/logs"
 mkdir -p "$LOGDIR"
 
@@ -71,6 +117,8 @@ ssh_pid=""
 http_pid=""
 http_cms_pid=""
 ftp_pid=""
+dns_pid=""
+ldap_pid=""
 
 echo -e "${yellow}[*]${end} ${purple}Launching service modules in parallel:${end}"
 
@@ -119,6 +167,49 @@ elif [ "$has_ftp" = true ] && [ ! -x "$FTP_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}FTP detected but ftp-master not found at${end} ${blue}$FTP_MASTER${end}"
 fi
 
+# --- DNS module (per-port DNS/AXFR/dnsenum; parallel like SSH/FTP) ---
+if [ "$has_dns" = true ] && [ -x "$DNS_MASTER" ]; then
+  echo -e "${yellow}  [-]${end} ${purple}Starting DNS module on port(s):${end} ${blue}${dns_ports_str}${end}"
+  "$DNS_MASTER" "$OUTDIR" "$TARGET" "$TARGETED_XML" "$dns_ports_str" >"$LOGDIR/dns.log" 2>&1 &
+  dns_pid=$!
+
+  (
+    while kill -0 "$dns_pid" 2>/dev/null; do
+      sleep 0.3
+    done
+
+    if [ -s "$LOGDIR/dns.log" ]; then
+      echo -e "\n${yellow}[*]${end} ${purple}DNS module results:${end}"
+      cat "$LOGDIR/dns.log"
+    fi
+  ) &
+
+elif [ "$has_dns" = true ] && [ ! -x "$DNS_MASTER" ]; then
+  echo -e "${yellow}[!]${end} ${purple}DNS detected but dns-master not found at${end} ${blue}$DNS_MASTER${end}"
+fi
+
+# --- LDAP module (anonymous ldapsearch-based enum; parallel like SSH/FTP/DNS) ---
+if [ "$has_ldap" = true ] && [ -x "$LDAP_MASTER" ]; then
+  echo -e "${yellow}  [-]${end} ${purple}Starting LDAP module on port(s):${end} ${blue}${ldap_ports_str:-<default>}${end}"
+  # ldap-master signature: ldap-master OUTDIR TARGET [PORTS]
+  "$LDAP_MASTER" "$OUTDIR" "$TARGET" "$ldap_ports_str" >"$LOGDIR/ldap.log" 2>&1 &
+  ldap_pid=$!
+
+  (
+    while kill -0 "$ldap_pid" 2>/dev/null; do
+      sleep 0.3
+    done
+
+    if [ -s "$LOGDIR/ldap.log" ]; then
+      echo -e "\n${yellow}[*]${end} ${purple}LDAP module results:${end}"
+      cat "$LOGDIR/ldap.log"
+    fi
+  ) &
+
+elif [ "$has_ldap" = true ] && [ ! -x "$LDAP_MASTER" ]; then
+  echo -e "${yellow}[!]${end} ${purple}LDAP detected but ldap-master not found at${end} ${blue}$LDAP_MASTER${end}"
+fi
+
 # --- HTTP core module (detect/collect/enrich/add-hosts) ---
 if [ "$has_http" = true ] && [ -x "$HTTP_MASTER" ]; then
   echo -e "${yellow}  [-]${end} ${purple}Starting HTTP module...${end}"
@@ -128,7 +219,7 @@ elif [ "$has_http" = true ] && [ ! -x "$HTTP_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}HTTP detected but http-master not found at${end} ${blue}$HTTP_MASTER${end}"
 fi
 
-if [ -z "$ssh_pid" ] && [ -z "$http_pid" ] && [ -z "$ftp_pid" ]; then
+if [ -z "$ssh_pid" ] && [ -z "$http_pid" ] && [ -z "$ftp_pid" ] && [ -z "$dns_pid" ] && [ -z "$ldap_pid" ]; then
   echo -e "${yellow}  [!] No service modules to run.${end}"
   exit 0
 fi
@@ -158,13 +249,21 @@ if [ -n "$http_cms_pid" ]; then
   fi
 fi
 
-# --- Ensure SSH and FTP have finished before treasure ---
+# --- Ensure SSH, FTP, DNS, LDAP have finished before treasure ---
 if [ -n "$ssh_pid" ]; then
   wait "$ssh_pid" 2>/dev/null || true
 fi
 
 if [ -n "$ftp_pid" ]; then
   wait "$ftp_pid" 2>/dev/null || true
+fi
+
+if [ -n "$dns_pid" ]; then
+  wait "$dns_pid" 2>/dev/null || true
+fi
+
+if [ -n "$ldap_pid" ]; then
+  wait "$ldap_pid" 2>/dev/null || true
 fi
 
 # --- Run Treasure aggregation (cheap, after all modules) ---

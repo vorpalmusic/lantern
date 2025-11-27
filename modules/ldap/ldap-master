@@ -1,0 +1,408 @@
+#!/usr/bin/env bash
+# ldap-master — LDAP/AD enumeration using ldapsearch (anonymous bind only)
+# Usage:
+#   ldap-master OUTDIR TARGET [PORTS]
+#
+# Behavior:
+#   - Ports: if PORTS is provided, treat it as comma-separated and keep only 389,636,3268,3269.
+#            If omitted, default to 389.
+#   - For each port:
+#       * Attempt anonymous bind to RootDSE.
+#       * Dump RootDSE and supported capabilities.
+#       * Derive Base DN from defaultNamingContext (or namingContexts).
+#       * Enumerate:
+#           - Domain object (Base DN, objectClass, etc.)
+#           - Users (non-computer) and key attributes
+#           - Groups and memberships
+#           - Computers (hostnames, OS, SPNs)
+#           - SPN-bearing accounts
+#           - “Interesting” admin-ish accounts
+#       * Artifacts under OUTDIR/ldap/<PORT>/:
+#           rootdse.txt
+#           basedn.txt
+#           domain.txt
+#           users.txt
+#           groups.txt
+#           computers.txt
+#           spn-accounts.txt
+#           interesting.txt
+#           summary.txt
+#
+#   - Requires: ldapsearch (ldap-utils)
+
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../.." >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
+
+SCRIPT_NAME="${0##*/}"
+
+usage() {
+  cat <<EOF
+Usage:
+  $SCRIPT_NAME OUTDIR TARGET [PORTS]
+
+Positional:
+  OUTDIR   Target output directory (per-host root used by Lantern)
+  TARGET   IP or hostname
+  PORTS    Optional comma-separated LDAP ports (e.g. "389", "389,636,3268,3269")
+           If omitted, defaults to 389.
+EOF
+  exit 1
+}
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+PORTS_ARG="${3:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
+  usage
+fi
+
+if ! command -v ldapsearch >/dev/null 2>&1; then
+  echo -e "${yellow}[!]${end} ${purple}ldapsearch not found (install ldap-utils); skipping LDAP module.${end}"
+  exit 0
+fi
+
+mkdir -p "$OUTDIR/ldap"
+
+echo -e "${yellow}[*]${end} ${purple}LDAP module started for target${end} ${blue}${TARGET}${end}"
+
+# --- Ports: keep only LDAP-ish ones (389, 636, 3268, 3269) ---
+
+ports=()
+
+if [ -n "$PORTS_ARG" ]; then
+  IFS=',' read -r -a raw_ports <<< "$PORTS_ARG"
+  for p in "${raw_ports[@]}"; do
+    p_clean="${p//[^0-9]/}"
+    [ -z "$p_clean" ] && continue
+    case "$p_clean" in
+      389|636|3268|3269)
+        ports+=("$p_clean")
+        ;;
+      *)
+        # ignore others
+        ;;
+    esac
+  done
+fi
+
+# Default to 389 if nothing usable was provided
+if [ "${#ports[@]}" -eq 0 ]; then
+  ports=(389)
+fi
+
+# --- Helper: port label + scheme ---
+
+ldap_port_label() {
+  local p="$1"
+  case "$p" in
+    389)  echo "LDAP (389)" ;;
+    636)  echo "LDAPS (636)" ;;
+    3268) echo "LDAP Global Catalog (3268)" ;;
+    3269) echo "LDAPS Global Catalog (3269)" ;;
+    *)    echo "LDAP-like on port $p" ;;
+  esac
+}
+
+ldap_scheme_for_port() {
+  local p="$1"
+  case "$p" in
+    636|3269) echo "ldaps" ;;
+    *)        echo "ldap" ;;
+  esac
+}
+
+# --- Helper: extract base DN from RootDSE ---
+
+extract_basedn() {
+  # $1: path to rootdse.txt
+  local f="$1" dn=""
+  if [ -s "$f" ]; then
+    # Prefer defaultNamingContext
+    dn="$(grep -m1 '^defaultNamingContext:' "$f" 2>/dev/null | sed 's/^defaultNamingContext:[[:space:]]*//')"
+    if [ -z "$dn" ]; then
+      # Fallback: namingContexts (first one)
+      dn="$(grep -m1 '^namingContexts:' "$f" 2>/dev/null | sed 's/^namingContexts:[[:space:]]*//')"
+    fi
+  fi
+  printf '%s\n' "$dn"
+}
+
+# --- Main per-port loop ---
+
+for PORT in "${ports[@]}"; do
+  LDAPDIR="$OUTDIR/ldap/$PORT"
+  mkdir -p "$LDAPDIR"
+
+  ROOTDSE_FILE="$LDAPDIR/rootdse.txt"
+  BASEDN_FILE="$LDAPDIR/basedn.txt"
+  DOMAIN_FILE="$LDAPDIR/domain.txt"
+  USERS_FILE="$LDAPDIR/users.txt"
+  GROUPS_FILE="$LDAPDIR/groups.txt"
+  COMPUTERS_FILE="$LDAPDIR/computers.txt"
+  SPN_FILE="$LDAPDIR/spn-accounts.txt"
+  INTERESTING_FILE="$LDAPDIR/interesting.txt"
+  SUMMARY_FILE="$LDAPDIR/summary.txt"
+
+  : >"$ROOTDSE_FILE"
+  : >"$BASEDN_FILE"
+  : >"$DOMAIN_FILE"
+  : >"$USERS_FILE"
+  : >"$GROUPS_FILE"
+  : >"$COMPUTERS_FILE"
+  : >"$SPN_FILE"
+  : >"$INTERESTING_FILE"
+  : >"$SUMMARY_FILE"
+
+  port_label="$(ldap_port_label "$PORT")"
+  scheme="$(ldap_scheme_for_port "$PORT")"
+  url="${scheme}://${TARGET}:${PORT}"
+
+  echo -e "${yellow}  [-]${end} ${purple}Enumerating LDAP on${end} ${blue}${TARGET}:${PORT}${end} ${purple}(${port_label})...${end}"
+
+  anon_ok=0
+  base_dn=""
+  users_count=0
+  groups_count=0
+  computers_count=0
+  spn_count=0
+  interesting_count=0
+
+  {
+    echo "==== LDAP Module Start ===="
+    echo "Target:      $TARGET"
+    echo "URL:         $url"
+    echo "Port label:  $port_label"
+    echo
+  } >>"$SUMMARY_FILE"
+
+  # --- RootDSE / anonymous bind test ---
+  # Note: nettimeout + time limit keep things from hanging forever.
+
+  ldapsearch -x \
+    -H "$url" \
+    -s base -b "" \
+    -LLL \
+    -o nettimeout=8 \
+    -l 20 \
+    '*' '+' >"$ROOTDSE_FILE" 2>/dev/null || true
+
+  if [ -s "$ROOTDSE_FILE" ]; then
+    anon_ok=1
+    echo -e "${green}    [*] Anonymous LDAP bind succeeded on${end} ${blue}${TARGET}:${PORT}${end}"
+  else
+    anon_ok=0
+    echo -e "${yellow}    [!] Anonymous LDAP bind failed or returned no data on${end} ${blue}${TARGET}:${PORT}${end}"
+  fi
+
+  {
+    echo "==== RootDSE / Capabilities ===="
+    if [ -s "$ROOTDSE_FILE" ]; then
+      cat "$ROOTDSE_FILE"
+    else
+      echo "<no RootDSE data; anonymous bind likely not allowed>"
+    fi
+    echo
+  } >>"$SUMMARY_FILE"
+
+  # Extract base DN
+  base_dn="$(extract_basedn "$ROOTDSE_FILE")"
+  printf "%s\n" "${base_dn:-}" >"$BASEDN_FILE"
+
+  if [ -n "$base_dn" ]; then
+    echo -e "${yellow}    [*]${end} ${purple}Base DN detected:${end} ${blue}${base_dn}${end}"
+  else
+    echo -e "${yellow}    [!] No base DN derived from RootDSE; skipping deep LDAP searches on${end} ${blue}${TARGET}:${PORT}${end}"
+  fi
+
+  # If no base_dn, just finalize summary for this port
+  if [ -z "$base_dn" ]; then
+    {
+      echo "==== LDAP Port Summary ===="
+      echo "Target:      $TARGET"
+      echo "Port:        $PORT"
+      echo "Port label:  $port_label"
+      echo "Anon bind:   $anon_ok"
+      echo "Base DN:     <none>"
+      echo
+    } >>"$SUMMARY_FILE"
+    continue
+  fi
+
+  # --- Domain object info (base DN) ---
+  ldapsearch -x \
+    -H "$url" \
+    -b "$base_dn" \
+    -s base \
+    -LLL \
+    -o nettimeout=8 \
+    -l 20 \
+    "(objectClass=*)" \
+    name distinguishedName objectClass \
+    >"$DOMAIN_FILE" 2>/dev/null || true
+
+  {
+    echo "==== Domain Object (Base DN) ===="
+    if [ -s "$DOMAIN_FILE" ]; then
+      cat "$DOMAIN_FILE"
+    else
+      echo "<no domain object returned from base DN>"
+    fi
+    echo
+  } >>"$SUMMARY_FILE"
+
+  # --- Users (non-computer) ---
+  ldapsearch -x \
+    -H "$url" \
+    -b "$base_dn" \
+    -s sub \
+    -LLL \
+    -o nettimeout=10 \
+    -l 60 \
+    -z 2000 \
+    "(&(objectCategory=person)(objectClass=user))" \
+    dn sAMAccountName userPrincipalName displayName description \
+    memberOf whenCreated whenChanged adminCount userAccountControl \
+    >"$USERS_FILE" 2>/dev/null || true
+
+  if [ -s "$USERS_FILE" ]; then
+    users_count="$(grep -c '^dn: ' "$USERS_FILE" 2>/dev/null || echo 0)"
+  fi
+
+  # --- Groups ---
+  ldapsearch -x \
+    -H "$url" \
+    -b "$base_dn" \
+    -s sub \
+    -LLL \
+    -o nettimeout=10 \
+    -l 60 \
+    -z 2000 \
+    "(objectClass=group)" \
+    dn sAMAccountName name description member \
+    >"$GROUPS_FILE" 2>/dev/null || true
+
+  if [ -s "$GROUPS_FILE" ]; then
+    groups_count="$(grep -c '^dn: ' "$GROUPS_FILE" 2>/dev/null || echo 0)"
+  fi
+
+  # --- Computers ---
+  ldapsearch -x \
+    -H "$url" \
+    -b "$base_dn" \
+    -s sub \
+    -LLL \
+    -o nettimeout=10 \
+    -l 60 \
+    -z 2000 \
+    "(objectCategory=computer)" \
+    dn sAMAccountName dNSHostName operatingSystem operatingSystemVersion \
+    servicePrincipalName \
+    >"$COMPUTERS_FILE" 2>/dev/null || true
+
+  if [ -s "$COMPUTERS_FILE" ]; then
+    computers_count="$(grep -c '^dn: ' "$COMPUTERS_FILE" 2>/dev/null || echo 0)"
+  fi
+
+  # --- SPN-bearing accounts (for later roasting) ---
+  ldapsearch -x \
+    -H "$url" \
+    -b "$base_dn" \
+    -s sub \
+    -LLL \
+    -o nettimeout=10 \
+    -l 60 \
+    -z 2000 \
+    "(servicePrincipalName=*)" \
+    dn sAMAccountName userPrincipalName servicePrincipalName \
+    >"$SPN_FILE" 2>/dev/null || true
+
+  if [ -s "$SPN_FILE" ]; then
+    spn_count="$(grep -c '^dn: ' "$SPN_FILE" 2>/dev/null || echo 0)"
+  fi
+
+  # --- "Interesting" accounts (basic heuristics) ---
+  # Look for adminCount=1 or classic admin groups referenced (Domain Admins, Enterprise Admins, etc.)
+  : >"$INTERESTING_FILE"
+  if [ -s "$USERS_FILE" ]; then
+    # adminCount=1
+    awk '
+      BEGIN { RS=""; FS="\n" }
+      /adminCount:[[:space:]]*1/ { print $0 "\n" }
+    ' "$USERS_FILE" >>"$INTERESTING_FILE" 2>/dev/null || true
+
+    # memberOf *Admins* etc.
+    awk '
+      BEGIN { RS=""; FS="\n" }
+      /memberOf: .*Domain Admins|memberOf: .*Enterprise Admins|memberOf: .*Schema Admins/ { print $0 "\n" }
+    ' "$USERS_FILE" >>"$INTERESTING_FILE" 2>/dev/null || true
+  fi
+
+  if [ -s "$INTERESTING_FILE" ]; then
+    # Deduplicate interesting entries by dn
+    awk '
+      BEGIN { RS=""; FS="\n" }
+      {
+        dn="";
+        for (i=1; i<=NF; i++) {
+          if ($i ~ /^dn: /) { dn=$i; break }
+        }
+        if (dn != "" && !(dn in seen)) {
+          seen[dn]=1;
+          print $0 "\n";
+        }
+      }
+    ' "$INTERESTING_FILE" >"$INTERESTING_FILE.tmp" 2>/dev/null || true
+    mv "$INTERESTING_FILE.tmp" "$INTERESTING_FILE" 2>/dev/null || true
+    interesting_count="$(grep -c '^dn: ' "$INTERESTING_FILE" 2>/dev/null || echo 0)"
+  fi
+
+  # --- Append key sections to summary for quick view ---
+  {
+    echo "==== Users (summary) ===="
+    echo "Total user objects (non-computer): $users_count"
+    echo
+    echo "==== Groups (summary) ===="
+    echo "Total group objects:              $groups_count"
+    echo
+    echo "==== Computers (summary) ===="
+    echo "Total computer objects:           $computers_count"
+    echo
+    echo "==== SPN-bearing accounts (summary) ===="
+    echo "Total accounts with SPNs:         $spn_count"
+    echo
+    echo "==== Interesting accounts (summary) ===="
+    echo "Heuristic matches (adminCount=1 or admin groups): $interesting_count"
+    echo
+  } >>"$SUMMARY_FILE"
+
+  # --- Port summary footer ---
+  {
+    echo "==== LDAP Port Summary ===="
+    echo "Target:       $TARGET"
+    echo "Port:         $PORT"
+    echo "Port label:   $port_label"
+    echo "Anon bind:    $anon_ok"
+    echo "Base DN:      ${base_dn:-<none>}"
+    echo "Users:        $users_count"
+    echo "Groups:       $groups_count"
+    echo "Computers:    $computers_count"
+    echo "SPN accounts: $spn_count"
+    echo "Interesting:  $interesting_count"
+    echo "Files:"
+    echo "  RootDSE:        $ROOTDSE_FILE"
+    echo "  Base DN:        $BASEDN_FILE"
+    echo "  Domain object:  $DOMAIN_FILE"
+    echo "  Users:          $USERS_FILE"
+    echo "  Groups:         $GROUPS_FILE"
+    echo "  Computers:      $COMPUTERS_FILE"
+    echo "  SPN accounts:   $SPN_FILE"
+    echo "  Interesting:    $INTERESTING_FILE"
+    echo
+  } >>"$SUMMARY_FILE"
+
+  echo -e "${yellow}    [*]${end} ${purple}LDAP enumeration finished for${end} ${blue}${TARGET}:${PORT}${end} ${purple}(users: $users_count, groups: $groups_count, computers: $computers_count, SPNs: $spn_count)${end}"
+done
+
+echo -e "${yellow}[+]${end} ${purple}LDAP module finished for target${end} ${blue}${TARGET}${end}"
+exit 0
