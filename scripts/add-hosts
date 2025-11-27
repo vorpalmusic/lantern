@@ -290,7 +290,7 @@ add_candidate() {
 
   # denylist
   if is_denied "$nm"; then
-    [ "$VERBOSE" -eq 1 ] && echo "[deny] $nm (denylist)" >&2
+    [ "$VERBOSE" -eq 1 ] && echo -e "${yellow}  [!] $nm (denylist)${end}" >&2
     return 0
   fi
 
@@ -325,10 +325,16 @@ if [[ "$MODE" == "all" || "$MODE" == "nmap" ]]; then
 fi
 
 # ---------- 2) Harvest domains from HTTP artifacts (mode http/all) ----------
-HTTP_ROOT="$OUTDIR/report/http"
 if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
-  if [ -d "$HTTP_ROOT" ]; then
-    echo -e "${yellow}[*] [add-hosts]:${end} ${purple}Harvesting hostnames from HTTP artifacts...${end}"
+  HTTP_ROOT=""
+  if [ -d "$OUTDIR/http" ]; then
+    HTTP_ROOT="$OUTDIR/http"
+  elif [ -d "$OUTDIR/report/http" ]; then
+    HTTP_ROOT="$OUTDIR/report/http"
+  fi
+
+  if [ -n "$HTTP_ROOT" ] && [ -d "$HTTP_ROOT" ]; then
+    echo -e "\n${yellow}[*] [add-hosts]:${end} ${purple}Harvesting hostnames from HTTP artifacts...${end}"
     while IFS= read -r portdir; do
       [ -d "$portdir" ] || continue
 
@@ -346,11 +352,11 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
 
     done < <(find "$HTTP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)
   else
-    [ "$VERBOSE" -eq 1 ] && echo "[info] no HTTP artifacts under $HTTP_ROOT" >&2
+    [ "$VERBOSE" -eq 1 ] && echo -e "${yellow}[!] [add-hosts]: no HTTP artifacts under $OUTDIR/http or $OUTDIR/report/http${end}" >&2
   fi
 
   # --- 3) harvest domains from http-collected emails and verify via Host header ---
-  if [ -n "${PORTS_ARG:-}" ]; then
+  if [ -n "$HTTP_ROOT" ] && [ -d "$HTTP_ROOT" ] && [ -n "${PORTS_ARG:-}" ]; then
     email_domains_file="$(mktemp)"
     trap 'rm -f "$email_domains_file"' EXIT
 
@@ -411,7 +417,7 @@ for lc in "${!host_ips[@]}"; do
 
   if upsert_host_entry "$ip" "$name"; then
     if [ "${DRY_RUN:-0}" -eq 0 ]; then
-      echo -e "${yellow}  [-]${end} ${blue}Ensured ${name} → ${ip}${end}"
+      echo -e "${yellow}  [-]${end} ${purple}Ensured:${end} ${blue}${name} → ${ip}${end}"
     fi
   else
     echo -e "${red}ERROR: failed to upsert '${name}' into /etc/hosts (sudo?)${end}" >&2
