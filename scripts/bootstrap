@@ -49,6 +49,7 @@ CORE_CMDS=(
   timeout
   lsof
   fuser
+  lftp
 )
 
 OPTIONAL_CMDS=(

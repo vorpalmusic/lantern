@@ -14,7 +14,7 @@ CONFIG="$ROOTDIR/.config"
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 # Run bootstrap only if depcheck==0
-if [ "$depcheck" -eq 0 ]; then
+if [ "${depcheck:-0}" -eq 0 ]; then
   "$SCRIPTDIR/bootstrap"
 
   # Re-source config in case bootstrap updated depcheck/init
@@ -22,9 +22,7 @@ if [ "$depcheck" -eq 0 ]; then
   depcheck="${depcheck:-0}"
 fi
 
-# -----------
-# Input flags and validation
-# ----------
+# ----------- Input flags and validation -----------
 
 # Do NOT allow running Lantern as root; use regular user + internal sudo
 if [ "$EUID" -eq 0 ]; then
@@ -33,7 +31,6 @@ if [ "$EUID" -eq 0 ]; then
   exit 1
 fi
 
-# Simple usage helper
 usage() {
   echo -e "\n${yellow}[!]${end} ${purple}Usage:${end} ${blue}$0 <IP>${end}"
   echo -e "   ${purple}or:${end} ${blue}$0 -v | --version${end}"
@@ -49,11 +46,9 @@ case "$arg" in
     ;;
   -h|--help|"")
     usage
-    # empty arg or -h/--help: treat as “not enough arguments”
     [ -z "$arg" ] && exit 1 || exit 0
     ;;
   -*)
-    # any other flag = unknown option
     echo -e "${red}[!] Unknown option:${end} ${blue}$arg${end}"
     usage
     exit 1
@@ -63,10 +58,7 @@ esac
 # By this point, $1 must be an IP (or at least, not a flag)
 target="$1"
 
-# ---------------------------
-# Output directory logic
-# ---------------------------
-# Keep OUTDIR under the caller's current working directory
+# --------------------------- Output directory logic ---------------------------
 BASEDIR="$(pwd)"
 OUTDIR="${BASEDIR}/${target}"
 REPORTDIR="${OUTDIR}/report"
@@ -78,8 +70,8 @@ echo -e "${yellow}[!] Please do not use it to break the law.${end}"
 ## HANDLE PRIVILEGES (for nmap SYN scans only)
 echo -e "${yellow}[*]${end} ${purple}Lantern needs elevated privileges ONLY for certain tasks. The rest of the commands are run as normal user.${end}"
 if ! sudo -v; then
-    echo -e "${red}[!] sudo authentication failed; cannot run privileged nmap scans.${end}"
-    exit 1
+  echo -e "${red}[!] sudo authentication failed; cannot run privileged nmap scans.${end}"
+  exit 1
 fi
 
 echo -e "${yellow}[*]${end} ${purple}Lantern config file is at:${end} ${blue}${CONFIG}${end}"
@@ -91,7 +83,7 @@ echo -e "${yellow}[*]${end} ${purple}Using output directory:${end} ${blue}$OUTDI
 "$SCRIPTDIR/banner"        ## cue banner
 
 ## BEGIN WORK.
-### run fast discovery scan just to find open ports (no live verbose spam)
+### 1) Rapid discovery scan to find open ports
 echo -e "\n${yellow}[*]${end} ${purple}Rapid nmap port discovery on${end} ${blue}$target${end}${purple}...${end}"
 
 ALLPORTS="$REPORTDIR/allPorts"
@@ -102,9 +94,7 @@ PART3="$REPORTDIR/allPorts.p3"
 # Clean old artifacts if they exist
 rm -f "$ALLPORTS" "$PART1" "$PART2" "$PART3"
 
-# Run three concurrent range scans to speed up discovery.
-# Combined, these cover 1–65535 without overlap:
-#   1–22000, 22001–44000, 44001–65535
+# Split full range into three concurrent scans for speed
 sudo /usr/bin/nmap \
   -p1-22000 --open -sS -n -Pn \
   --min-rate 2500 \
@@ -138,14 +128,11 @@ pid3=$!
 # Wait for all three discovery scans to finish
 wait "$pid1" "$pid2" "$pid3" 2>/dev/null || true
 
-# Merge into a single greppable file so the rest of the script
-# can continue to treat $ALLPORTS exactly as before.
+# Merge into single greppable file
 : > "$ALLPORTS"
 [ -f "$PART1" ] && cat "$PART1" >> "$ALLPORTS"
 [ -f "$PART2" ] && cat "$PART2" >> "$ALLPORTS"
 [ -f "$PART3" ] && cat "$PART3" >> "$ALLPORTS"
-
-# Optionally clean up the parts
 rm -f "$PART1" "$PART2" "$PART3"
 
 # If greppable file exists, extract ports and print a compact summary only
@@ -162,17 +149,16 @@ else
   echo -e "${red}[!] Nmap greppable output missing: $ALLPORTS${end}\n"
 fi
 
-### grab all those ports from the nmap scan and put them in a list
+### 2) Targeted scan on discovered ports (sync)
 ports=""
 if [ -f "$ALLPORTS" ]; then
   ports=$(grep -oP '\d{1,5}/open' "$ALLPORTS" | cut -d '/' -f1 | xargs | tr ' ' ',')
 fi
 
-# --- targeted scan (only if we have ports, runs synchronously) ---
 TARGETED_XML="$REPORTDIR/targetedXML"
 
 if [ -n "$ports" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Targeted scanning on discovered ports...if there are many, this could take a while.${end}" 
+  echo -e "${yellow}[*]${end} ${purple}Targeted scanning on discovered ports... if there are many, this could take a while.${end}"
   echo -e "${purple}    Results will populate the web report.${end}"
   sudo /usr/bin/nmap -sCV -p"$ports" -n -Pn --max-retries 2 --host-timeout 120s "$target" \
        -oX "$TARGETED_XML" >/dev/null 2>&1
@@ -180,20 +166,7 @@ else
   echo -e "${yellow}[!] No open ports detected; skipping targeted scan.${end}"
 fi
 
-echo $IP
-
-## add-hosts runs to discover any possible domains in the nmap output
-sudo bash "$ROOTDIR/scripts/add-hosts" \
-  "$OUTDIR" \
-  "$target" \
-  "" \
-  --deny-file "$LISTDIR/deny-domains" \
-  --mode nmap
-
-# --- service dispatch (SSH / HTTP / HTTP-CMS, etc.) ---
-"$ROOTDIR/scripts/dispatch" "$OUTDIR" "$target" "$TARGETED_XML" "$ports" || true
-
-# ... generate HTML deep dive
+### 3) Base HTML report (from nmap XML) — BEFORE modules
 : "${NMAP_XSL:=/usr/share/nmap/nmap.xsl}"
 if [ ! -f "$NMAP_XSL" ]; then
   NMAP_XSL="$(find /usr/local/share /usr/share /opt -type f -name nmap.xsl 2>/dev/null | head -n1 || true)"
@@ -203,12 +176,9 @@ REPORT_HTML="$REPORTDIR/index.html"
 
 if [ -s "$TARGETED_XML" ]; then
   if [ -n "$NMAP_XSL" ] && [ -f "$NMAP_XSL" ]; then
-    xsltproc -o "$REPORT_HTML" "$NMAP_XSL" "$TARGETED_XML" || echo "[!] xsltproc failed"
-    rep="$ROOTDIR/scripts/reporter"
-    if [ -x "$rep" ]; then
-      "$rep" "$OUTDIR" || echo "[!] reporter failed"
-    else
-      echo "[!] reporter not found or not executable; skipping module summary"
+    echo -e "${yellow}[*]${end} ${purple}Generating base HTML report from nmap XML...${end}"
+    if ! xsltproc -o "$REPORT_HTML" "$NMAP_XSL" "$TARGETED_XML"; then
+      echo "[!] xsltproc failed; base HTML report was not generated"
     fi
   else
     echo "[!] nmap.xsl stylesheet not found; cannot generate HTML"
@@ -217,7 +187,28 @@ else
   echo "[!] targetedXML missing or empty; skipping HTML generation"
 fi
 
-# --- wait briefly for index.html to appear (fast loop, up to ~5 seconds) ---
+### 4) add-hosts to discover possible domains from Nmap output
+sudo bash "$ROOTDIR/scripts/add-hosts" \
+  "$OUTDIR" \
+  "$target" \
+  "" \
+  --deny-file "$LISTDIR/deny-domains" \
+  --mode nmap
+
+### 5) Service dispatch (SSH / HTTP / CMS / FTP, etc.)
+"$ROOTDIR/scripts/dispatch" "$OUTDIR" "$target" "$TARGETED_XML" "$ports" || true
+
+### 6) Reporter: append module summaries into HTML (AFTER all modules)
+rep="$ROOTDIR/scripts/reporter"
+if [ -x "$rep" ] && [ -s "$REPORT_HTML" ]; then
+  "$rep" "$OUTDIR" || echo "[!] reporter failed"
+elif [ ! -s "$REPORT_HTML" ]; then
+  echo "[!] index.html not found or empty in $REPORTDIR; skipping reporter"
+else
+  echo "[!] reporter not found or not executable; skipping module summary"
+fi
+
+# --- wait briefly for index.html to appear (safety, up to ~5 seconds) ---
 tries=0
 while [ $tries -lt 50 ] && [ ! -s "$REPORT_HTML" ]; do
   sleep 0.1
@@ -225,7 +216,7 @@ while [ $tries -lt 50 ] && [ ! -s "$REPORT_HTML" ]; do
 done
 
 if [ -s "$REPORT_HTML" ]; then
-  # 1) Ensure no stale server is hogging 9999 (port conflicts cause silent failures)
+  # 1) Ensure no stale server is hogging 9999
   if command -v lsof >/dev/null 2>&1; then
     stale_pids="$(lsof -tiTCP:9999 -sTCP:LISTEN 2>/dev/null || true)"
     if [ -n "$stale_pids" ]; then

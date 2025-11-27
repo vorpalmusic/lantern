@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+# ftp-master — enumerate anonymous FTP, check perms, list interesting files
+# Usage:
+#   ftp-master OUTDIR IP [PORT] [--max-depth N] [--max-dirs N] [--max-files N] [--verbose]
+#
+# Behavior:
+#   - Anonymous-only, trying several common anonymous credential variants.
+#   - If no anonymous combo works, script exits cleanly (code 0) after logging.
+#   - Produces artifacts under: OUTDIR/ftp/<PORT>/
+#       summary.txt     — main summary (SYST/FEAT, stats, perms summary, webroot hints)
+#       tree.txt        — directory/file tree
+#       interesting.txt — interesting file paths
+#       perms.txt       — detailed anon write test (root dir)
+#       webroots.txt    — candidate web-root-ish directories
+#   - Requires: lftp  (apt install lftp)
+
+ROOTDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
+
+SCRIPT_NAME="${0##*/}"
+
+usage() {
+  cat <<EOF
+Usage:
+  $SCRIPT_NAME OUTDIR IP [PORT] [--max-depth N] [--max-dirs N] [--max-files N] [--verbose]
+
+Positional:
+  OUTDIR        Target output directory (per-host root used by Lantern)
+  IP            Target IP or hostname
+  PORT          FTP port (default: 21)
+
+Options:
+  --max-depth N   Max directory depth to recurse (default: 2)
+  --max-dirs N    Max number of directories to visit (default: 100)
+  --max-files N   Max number of files to record (default: 400)
+  --verbose       Chatty output to stdout
+
+Example:
+  $SCRIPT_NAME "/home/kali/targets/box/10.10.10.10" 10.10.10.10 21 --max-depth 2
+EOF
+  exit 1
+}
+
+if [ "$#" -lt 2 ]; then
+  usage
+fi
+
+OUTDIR="$1"; shift
+IP="$1"; shift
+
+# Optional PORT (default 21)
+PORT="21"
+if [ "$#" -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+  PORT="$1"
+  shift
+fi
+
+# Defaults
+MAX_DEPTH=2
+MAX_DIRS=100
+MAX_FILES=400
+VERBOSE=0
+
+# Parse options
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --max-depth)
+      MAX_DEPTH="$2"; shift 2 ;;
+    --max-dirs)
+      MAX_DIRS="$2"; shift 2 ;;
+    --max-files)
+      MAX_FILES="$2"; shift 2 ;;
+    --verbose)
+      VERBOSE=1; shift ;;
+    -*)
+      echo -e "${red}[!]${end} Unknown option: $1" >&2
+      usage ;;
+    *)
+      # ignore stray non-option args
+      shift ;;
+  esac
+done
+
+if ! command -v lftp >/dev/null 2>&1; then
+  echo -e "${red}[!] lftp not found. Install it with:${end} ${yellow}sudo apt install lftp${end}"
+  exit 1
+fi
+
+# Per-service, per-port dir: OUTDIR/ftp/<PORT>/
+FTPDIR="$OUTDIR/ftp/$PORT"
+mkdir -p "$FTPDIR"
+
+SUMMARY_FILE="$FTPDIR/summary.txt"
+TREE_FILE="$FTPDIR/tree.txt"
+INTERESTING_FILE="$FTPDIR/interesting.txt"
+PERMS_FILE="$FTPDIR/perms.txt"
+WEBROOTS_FILE="$FTPDIR/webroots.txt"
+
+: >"$SUMMARY_FILE"
+: >"$TREE_FILE"
+: >"$INTERESTING_FILE"
+: >"$PERMS_FILE"
+: >"$WEBROOTS_FILE"
+
+TIMEOUT=10
+
+# Anonymous variants to try (user / pass)
+# Kept small on purpose; this runs once per FTP service, not per file.
+ANON_USERS=(
+  "anonymous"
+  "ftp"
+  "anonymous"
+  "anonymous"
+)
+
+ANON_PASSWORDS=(
+  "anonymous"
+  "ftp"
+  "anonymous@${IP}"
+  "anonymous@lantern.local"
+)
+
+ANON_COMBO_DESC="anonymous/anonymous, ftp/ftp, anonymous/anonymous@${IP}, anonymous/anonymous@lantern.local"
+
+FTP_USER=""
+FTP_PASS=""
+ANON_SUCCESS_LABEL=""
+
+log() {
+  if [ "$VERBOSE" -eq 1 ]; then
+    echo -e "$@"
+  fi
+}
+
+# Single-command helper. Assumes FTP_USER/FTP_PASS are already selected.
+ftp_cmd() {
+  # $1 = lftp command string
+  local cmd="$1"
+
+  # If somehow called before creds are set, fail fast and loudly in logs, but
+  # avoid crashing the script.
+  if [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
+    log "${red}[!] ftp_cmd called without FTP_USER/FTP_PASS set${end}"
+    return 1
+  fi
+
+  lftp -u "$FTP_USER","$FTP_PASS" "ftp://$IP:$PORT" \
+    -e "set net:max-retries 1; set net:timeout $TIMEOUT; set cmd:fail-exit yes; $cmd; bye"
+}
+
+# Try common anonymous credential variants once, then reuse the winning combo.
+select_anon_creds() {
+  local i user pass
+
+  for i in "${!ANON_USERS[@]}"; do
+    user="${ANON_USERS[$i]}"
+    pass="${ANON_PASSWORDS[$i]}"
+
+    if lftp -u "$user","$pass" "ftp://$IP:$PORT" \
+         -e "set net:max-retries 1; set net:timeout $TIMEOUT; set cmd:fail-exit yes; pwd; bye" \
+         >/dev/null 2>&1; then
+      FTP_USER="$user"
+      FTP_PASS="$pass"
+      ANON_SUCCESS_LABEL="${user} / ${pass}"
+      return 0
+    fi
+  done
+
+  FTP_USER=""
+  FTP_PASS=""
+  ANON_SUCCESS_LABEL=""
+  return 1
+}
+
+log "  OUTDIR: $OUTDIR"
+log "  FTPDIR: $FTPDIR"
+log "  MAX_DEPTH: $MAX_DEPTH | MAX_DIRS: $MAX_DIRS | MAX_FILES: $MAX_FILES"
+
+# 1) Test anonymous login with several common variants
+if ! select_anon_creds; then
+  echo -e "${yellow}[!] Anonymous FTP login not allowed on${end} ${blue}${IP}:${PORT}${end}. Skipping."
+  {
+    echo "Target: $IP:$PORT"
+    echo "Timestamp (UTC): $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo
+    echo "Result: Anonymous login not allowed."
+    echo "Anonymous credential combos tried:"
+    echo "  $ANON_COMBO_DESC"
+  } >>"$SUMMARY_FILE"
+  exit 0
+fi
+
+echo -e "${green}[*] Anonymous FTP login succeeded on${end} ${blue}${IP}:${PORT}${end}"
+log "  Using anonymous combo: $ANON_SUCCESS_LABEL"
+
+# 2) Basic banner/info
+SYST_OUT="$(ftp_cmd "quote SYST" 2>/dev/null || true)"
+FEAT_OUT="$(ftp_cmd "quote FEAT" 2>/dev/null || true)"
+
+{
+  echo "Target: $IP:$PORT"
+  echo "Timestamp (UTC): $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  echo
+  echo "==== FTP Anonymous Authentication ===="
+  echo "Anonymous credential combos tried:"
+  echo "  $ANON_COMBO_DESC"
+  echo "Successful combo:"
+  echo "  ${ANON_SUCCESS_LABEL}"
+  echo
+  echo "==== FTP Server Info ===="
+  echo "SYST:"
+  echo "${SYST_OUT:-<no SYST response>}"
+  echo
+  echo "FEAT:"
+  echo "${FEAT_OUT:-<no FEAT response>}"
+  echo
+} >>"$SUMMARY_FILE"
+
+# 3) Recursive anon listing (shallow)
+echo -e "${yellow}[*]${end} ${purple}Enumerating anonymous FTP directories (depth <= ${MAX_DEPTH})...${end}"
+
+declare -a dirs_to_visit
+declare -a depths
+declare -a visited_dirs
+
+dirs_to_visit=(".")
+depths=(0)
+
+dir_count=0
+file_count=0
+
+is_dir_visited() {
+  local d="$1"
+  local v
+  for v in "${visited_dirs[@]}"; do
+    if [ "$v" = "$d" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+mark_dir_visited() {
+  visited_dirs+=("$1")
+}
+
+print_tree_line() {
+  local depth="$1"
+  local type="$2"  # D or F
+  local path="$3"
+  printf "%*s[%s] %s\n" $((depth * 2)) "" "$type" "$path" >>"$TREE_FILE"
+}
+
+# crude but effective patterns for "interesting" files
+is_interesting_name() {
+  local name="$1"
+  if [[ "$name" =~ \.(sql|bak|zip|tar|gz|tgz|7z|rar|conf|cfg|ini|log)$ ]]; then
+    return 0
+  fi
+  if [[ "$name" =~ [Pp]ass ]] || [[ "$name" =~ [Cc]onfig ]] || \
+     [[ "$name" =~ [Bb]ackup ]] || [[ "$name" =~ [Dd]b ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# directories that look like they might be web roots
+is_webroot_candidate() {
+  local name="$1"
+  case "$name" in
+    www|wwwroot|htdocs|public_html|html|site|web)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+while [ "${#dirs_to_visit[@]}" -gt 0 ]; do
+  # pop from front
+  current_dir="${dirs_to_visit[0]}"
+  current_depth="${depths[0]}"
+  dirs_to_visit=("${dirs_to_visit[@]:1}")
+  depths=("${depths[@]:1}")
+
+  if is_dir_visited "$current_dir"; then
+    continue
+  fi
+  mark_dir_visited "$current_dir"
+
+  if [ "$dir_count" -ge "$MAX_DIRS" ]; then
+    log "  [!] Reached MAX_DIRS=$MAX_DIRS, stopping dir traversal."
+    break
+  fi
+
+  ((dir_count++))
+
+  # Represent "." as "/" in output
+  display_dir="$current_dir"
+  [ "$display_dir" = "." ] && display_dir="/"
+
+  print_tree_line "$current_depth" "D" "$display_dir"
+
+  # Fetch listing for current_dir
+  LIST_OUT="$(ftp_cmd "cd \"$current_dir\"; ls" 2>/dev/null || true)"
+
+  IFS=$'\n'
+  for line in $LIST_OUT; do
+    # Typical line: drwxr-xr-x   2 owner group     4096 Jan 01 12:00 pub
+    # Very crude parse: perms = first field, name = last field
+    perms="${line%% *}"
+    name="${line##* }"
+
+    # Skip empties
+    [ -z "$line" ] && continue
+    # Skip "." and ".."
+    [ "$name" = "." ] && continue
+    [ "$name" = ".." ] && continue
+
+    # Build a normalized remote path
+    if [ "$current_dir" = "." ]; then
+      full_path="/$name"
+      child_cd="$name"
+    else
+      full_path="$current_dir/$name"
+      child_cd="$current_dir/$name"
+    fi
+
+    if [[ "$perms" == d* ]]; then
+      # Directory
+      print_tree_line "$((current_depth + 1))" "D" "$full_path"
+
+      # Check if this dir *name* looks like a web root
+      if is_webroot_candidate "$name"; then
+        echo "$full_path" >>"$WEBROOTS_FILE"
+      fi
+
+      if [ "$current_depth" -lt "$MAX_DEPTH" ] && [ "${#dirs_to_visit[@]}" -lt "$MAX_DIRS" ]; then
+        dirs_to_visit+=("$child_cd")
+        depths+=("$((current_depth + 1))")
+      fi
+    else
+      # File
+      if [ "$file_count" -ge "$MAX_FILES" ]; then
+        continue
+      fi
+      ((file_count++))
+
+      print_tree_line "$((current_depth + 1))" "F" "$full_path"
+
+      if is_interesting_name "$name"; then
+        echo "$full_path" >>"$INTERESTING_FILE"
+      fi
+    fi
+  done
+  unset IFS
+done
+
+{
+  echo "==== Anonymous Directory Enumeration ===="
+  echo "Directories visited: $dir_count (max $MAX_DIRS)"
+  echo "Files recorded:      $file_count (max $MAX_FILES)"
+  echo "Tree file:           $TREE_FILE"
+  echo "Interesting files:   $INTERESTING_FILE"
+  echo
+} >>"$SUMMARY_FILE"
+
+# If we found any obvious web-ish dirs, surface them clearly in the summary
+if [ -s "$WEBROOTS_FILE" ]; then
+  {
+    echo "==== Candidate Web Roots ===="
+    echo "The following directories look web-root-ish based on their names."
+    echo "They may correspond to HTTP document roots or deployed sites:"
+    cat "$WEBROOTS_FILE"
+    echo
+  } >>"$SUMMARY_FILE"
+fi
+
+echo -e "${yellow}[*]${end} ${purple}FTP directory enumeration complete (dirs: ${dir_count}, files: ${file_count})${end}"
+
+# 4) Permission / write checks (root only, anon)
+echo -e "${yellow}[*]${end} ${purple}Testing anonymous write permissions in FTP root (login directory)...${end}"
+
+TEST_DIR=".lantern_ftp_test_$$"
+TMPFILE="$(mktemp "${TMPDIR:-/tmp}/lantern_ftp_test.XXXXXX")"
+echo "Lantern FTP write test" >"$TMPFILE"
+
+MKD_OK=0
+STOR_OK=0
+CLEAN_OK=0
+
+if ftp_cmd "mkdir \"$TEST_DIR\"" >/dev/null 2>&1; then
+  MKD_OK=1
+  if ftp_cmd "cd \"$TEST_DIR\"; put \"$TMPFILE\" -o test.txt" >/dev/null 2>&1; then
+    STOR_OK=1
+    if ftp_cmd "cd \"$TEST_DIR\"; rm -f test.txt; cd ..; rmdir \"$TEST_DIR\"" >/dev/null 2>&1; then
+      CLEAN_OK=1
+    fi
+  else
+    # Try to at least remove the dir if upload failed
+    ftp_cmd "rmdir \"$TEST_DIR\"" >/dev/null 2>&1 || true
+  fi
+fi
+
+rm -f "$TMPFILE"
+
+{
+  echo "==== Anonymous Write Test (root dir) ===="
+  echo "MKD (create dir) allowed:   $MKD_OK"
+  echo "STOR (upload file) allowed: $STOR_OK"
+  echo "Cleanup successful:         $CLEAN_OK"
+  echo
+} >>"$PERMS_FILE"
+
+{
+  echo "==== FTP Permissions Summary ===="
+  echo "Anonymous MKD allowed (root):   $MKD_OK"
+  echo "Anonymous STOR allowed (root):  $STOR_OK"
+  echo "Permissions details:            $PERMS_FILE"
+  echo
+} >>"$SUMMARY_FILE"
+
+if [ "$MKD_OK" -eq 1 ] || [ "$STOR_OK" -eq 1 ]; then
+  echo -e "${green}  [*] Anonymous user appears to have write permissions on${end} ${blue}${IP}:${PORT}${end}"
+else
+  echo -e "${yellow}  [!] Anonymous user does not appear to have basic write perms in root.${end}"
+fi
+
+echo -e "${yellow}[+]${end} ${purple}FTP module completed for${end} ${blue}${IP}:${PORT}${end}"
+
+exit 0

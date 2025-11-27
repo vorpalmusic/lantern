@@ -18,10 +18,15 @@ fi
 SSH_MASTER="$ROOTDIR/modules/ssh/ssh-master"
 HTTP_MASTER="$ROOTDIR/modules/http/http-master"
 HTTP_CMS_MASTER="$ROOTDIR/modules/http/http-cms"
+FTP_MASTER="$ROOTDIR/modules/ftp/ftp-master"
 TREASURE="$ROOTDIR/scripts/treasure"
 
 has_ssh=false
 has_http=false
+has_ftp=false
+
+# crude single ftp port tracking (most boxes: 21)
+ftp_port=""
 
 # --- Service detection from ports (fast, doesn't depend on XML) ---
 if [ -n "${PORTS:-}" ]; then
@@ -34,6 +39,11 @@ if [ -n "${PORTS:-}" ]; then
     case "$p" in
       80|443|8080|8443) has_http=true ;;
     esac
+
+    if [ "$p" = "21" ]; then
+      has_ftp=true
+      ftp_port="21"
+    fi
   done
 fi
 
@@ -42,6 +52,16 @@ if [ -n "${TARGETED_XML:-}" ] && [ -s "$TARGETED_XML" ]; then
   if grep -qi 'service name="ssh"' "$TARGETED_XML";   then has_ssh=true;  fi
   if grep -qi 'service name="http"' "$TARGETED_XML";  then has_http=true; fi
   if grep -qi 'service name="https"' "$TARGETED_XML"; then has_http=true; fi
+
+  # Try to spot FTP in XML as a fallback if PORTS wasn't populated
+  if grep -qi 'service name="ftp"' "$TARGETED_XML"; then
+    has_ftp=true
+    if [ -z "$ftp_port" ]; then
+      ftp_port="$(grep -i 'service name="ftp"' "$TARGETED_XML" \
+        | sed -E 's/.*portid="([0-9]+)".*/\1/' \
+        | head -n1)"
+    fi
+  fi
 fi
 
 LOGDIR="$OUTDIR/logs"
@@ -50,6 +70,7 @@ mkdir -p "$LOGDIR"
 ssh_pid=""
 http_pid=""
 http_cms_pid=""
+ftp_pid=""
 
 echo -e "${yellow}[*]${end} ${purple}Launching service modules in parallel:${end}"
 
@@ -61,7 +82,6 @@ if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
 
   # Printer helper: poll until ssh_pid is gone, then print its log
   (
-    # Wait until the SSH process is no longer running
     while kill -0 "$ssh_pid" 2>/dev/null; do
       sleep 0.3
     done
@@ -76,6 +96,29 @@ elif [ "$has_ssh" = true ] && [ ! -x "$SSH_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}SSH detected but ssh-master not found at${end} ${blue}$SSH_MASTER${end}"
 fi
 
+# --- FTP module (anonymous enum; runs parallel like SSH) ---
+if [ "$has_ftp" = true ] && [ -n "$ftp_port" ] && [ -x "$FTP_MASTER" ]; then
+  echo -e "${yellow}  [-]${end} ${purple}Starting FTP module on port $ftp_port...${end}"
+  "$FTP_MASTER" "$OUTDIR" "$TARGET" "$ftp_port" >"$LOGDIR/ftp.log" 2>&1 &
+  ftp_pid=$!
+
+  (
+    while kill -0 "$ftp_pid" 2>/dev/null; do
+      sleep 0.3
+    done
+
+    if [ -s "$LOGDIR/ftp.log" ]; then
+      echo -e "\n${yellow}[*]${end} ${purple}FTP module results:${end}"
+      cat "$LOGDIR/ftp.log"
+    fi
+  ) &
+
+elif [ "$has_ftp" = true ] && [ -z "$ftp_port" ]; then
+  echo -e "${yellow}[!]${end} ${purple}FTP detected in XML but no port resolved; skipping ftp-master.${end}"
+elif [ "$has_ftp" = true ] && [ ! -x "$FTP_MASTER" ]; then
+  echo -e "${yellow}[!]${end} ${purple}FTP detected but ftp-master not found at${end} ${blue}$FTP_MASTER${end}"
+fi
+
 # --- HTTP core module (detect/collect/enrich/add-hosts) ---
 if [ "$has_http" = true ] && [ -x "$HTTP_MASTER" ]; then
   echo -e "${yellow}  [-]${end} ${purple}Starting HTTP module...${end}"
@@ -85,7 +128,7 @@ elif [ "$has_http" = true ] && [ ! -x "$HTTP_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}HTTP detected but http-master not found at${end} ${blue}$HTTP_MASTER${end}"
 fi
 
-if [ -z "$ssh_pid" ] && [ -z "$http_pid" ]; then
+if [ -z "$ssh_pid" ] && [ -z "$http_pid" ] && [ -z "$ftp_pid" ]; then
   echo -e "${yellow}  [!] No service modules to run.${end}"
   exit 0
 fi
@@ -115,9 +158,13 @@ if [ -n "$http_cms_pid" ]; then
   fi
 fi
 
-# --- Ensure SSH has actually finished before treasure (reap zombie) ---
+# --- Ensure SSH and FTP have finished before treasure ---
 if [ -n "$ssh_pid" ]; then
   wait "$ssh_pid" 2>/dev/null || true
+fi
+
+if [ -n "$ftp_pid" ]; then
+  wait "$ftp_pid" 2>/dev/null || true
 fi
 
 # --- Run Treasure aggregation (cheap, after all modules) ---
