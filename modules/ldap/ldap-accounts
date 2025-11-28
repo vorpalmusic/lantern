@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+# ldap-accounts — user/service/system/extra/hidden account analysis for ldap-master
+# Usage:
+#   ldap-accounts OUTDIR TARGET PORT
+#
+# This script expects ldap-master to have already:
+#   - created OUTDIR/ldap/<PORT>/
+#   - performed core LDAP searches:
+#       users.txt, groups.txt, computers.txt, spn-accounts.txt, all-objects.txt (may be empty initially)
+#   - set up all expected artifact filenames
+#
+# This module:
+#   - builds interesting.txt
+#   - classifies accounts (HUMAN/SERVICE/SYSTEM + enabled/disabled + ASREP flag)
+#   - performs full objectClass=* enumeration
+#   - extracts extra accounts
+#   - identifies hidden svc-* accounts
+#   - updates counters in CLASS_FILE
+#
+
+OUTDIR="$1"
+TARGET="$2"
+PORT="$3"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ] || [ -z "$PORT" ]; then
+  echo "[!] ldap-accounts: Usage: ldap-accounts OUTDIR TARGET PORT" >&2
+  exit 2
+fi
+
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../.." >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
+
+LDAPDIR="$OUTDIR/ldap/$PORT"
+
+USERS_FILE="$LDAPDIR/users.txt"
+INTERESTING_FILE="$LDAPDIR/interesting.txt"
+CLASS_FILE="$LDAPDIR/users-classified.txt"
+ALLOBJ_FILE="$LDAPDIR/all-objects.txt"
+EXTRA_ACCOUNTS_FILE="$LDAPDIR/extra-accounts.txt"
+KNOWN_SAM_FILE="$LDAPDIR/known-sam.txt"
+ALL_ACCOUNTS_RAW="$LDAPDIR/all-accounts-raw.txt"
+HIDDEN_FILE="$LDAPDIR/hidden-accounts.txt"
+BASEDN_FILE="$LDAPDIR/basedn.txt"
+
+url=""
+base_dn=""
+if [ -f "$BASEDN_FILE" ]; then
+  base_dn="$(head -n1 "$BASEDN_FILE")"
+fi
+
+scheme="ldap"
+case "$PORT" in
+  636|3269) scheme="ldaps" ;;
+esac
+url="${scheme}://${TARGET}:${PORT}"
+
+############################################
+### START OF EXTRACTED BLOCK FROM ldap-master
+############################################
+
+# Reset files that belong to this phase
+: >"$INTERESTING_FILE"
+: >"$CLASS_FILE"
+: >"$EXTRA_ACCOUNTS_FILE"
+: >"$KNOWN_SAM_FILE"
+: >"$ALL_ACCOUNTS_RAW"
+: >"$HIDDEN_FILE"
+
+human_count=0
+service_count=0
+asrep_count=0
+interesting_count=0
+extra_accounts_count=0
+
+############################################
+# "Interesting" accounts (adminCount, admin groups)
+############################################
+if [ -s "$USERS_FILE" ]; then
+  # adminCount=1
+  awk '
+    BEGIN { RS=""; FS="\n" }
+    /adminCount:[[:space:]]*1/ { print $0 "\n" }
+  ' "$USERS_FILE" >>"$INTERESTING_FILE" 2>/dev/null || true
+
+  # memberOf *Admins* etc.
+  awk '
+    BEGIN { RS=""; FS="\n" }
+    /memberOf: .*Domain Admins|memberOf: .*Enterprise Admins|memberOf: .*Schema Admins/ { print $0 "\n" }
+  ' "$USERS_FILE" >>"$INTERESTING_FILE" 2>/dev/null || true
+fi
+
+if [ -s "$INTERESTING_FILE" ]; then
+  # Deduplicate interesting entries by dn
+  awk '
+    BEGIN { RS=""; FS="\n" }
+    {
+      dn="";
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^dn: /) { dn=$i; break }
+      }
+      if (dn != "" && !(dn in seen)) {
+        seen[dn]=1;
+        print $0 "\n";
+      }
+    }
+  ' "$INTERESTING_FILE" >"$INTERESTING_FILE.tmp" 2>/dev/null || true
+  mv "$INTERESTING_FILE.tmp" "$INTERESTING_FILE" 2>/dev/null || true
+  interesting_count="$(grep -c '^dn: ' "$INTERESTING_FILE" 2>/dev/null || true)"
+  [ -z "$interesting_count" ] && interesting_count=0
+fi
+
+############################################
+# Classification helper
+############################################
+classify_sam() {
+  local sam_local="$1"
+  local uac_local="$2"
+  local sam_l uacv system state asrep type
+
+  [ -z "$sam_local" ] && return 0
+
+  sam_l="${sam_local,,}"
+  uacv=0
+  if [[ "$uac_local" =~ ^[0-9]+$ ]]; then
+    uacv="$uac_local"
+  fi
+
+  system=0
+  case "$sam_l" in
+    guest|defaultaccount) system=1 ;;
+  esac
+  [[ "$sam_l" == sm_* ]] && system=1
+  [[ "$sam_l" == healthmailbox* ]] && system=1
+  [[ "$sam_l" == msol_* ]] && system=1
+  [[ "$sam_local" == *'$' ]] && system=1
+
+  state="unknown"
+  if (( uacv > 0 )); then
+    if (( uacv & 2 )); then state="disabled"; else state="enabled"; fi
+  fi
+
+  asrep="NO"
+  if (( uacv > 0 && (uacv & 4194304) != 0 )); then
+    asrep="ASREP_ROASTABLE"
+  fi
+
+  type="HUMAN"
+  if (( system )); then
+    type="SYSTEM"
+  else
+    if [[ "$sam_l" == svc-* || "$sam_l" == svc_* || \
+          "$sam_l" == sql* || "$sam_l" == backup* || \
+          "$sam_l" == app* || "$sam_l" == service* || \
+          "$sam_local" == '$'* ]]; then
+      type="SERVICE"
+    fi
+  fi
+
+  printf '%s|%s|%s|%s\n' "$type" "$sam_local" "$state" "$asrep" >>"$CLASS_FILE"
+}
+
+############################################
+# Classification from USERS_FILE -> CLASS_FILE
+############################################
+if [ -s "$USERS_FILE" ]; then
+  : >"$CLASS_FILE"
+
+  sam=""
+  uac=""
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      dn:\ *)
+        classify_sam "$sam" "$uac"
+        sam=""
+        uac=""
+        ;;
+      sAMAccountName:\ *)
+        sam="${line#sAMAccountName: }"
+        ;;
+      userAccountControl:\ *)
+        uac="${line#userAccountControl: }"
+        ;;
+    esac
+  done <"$USERS_FILE"
+
+  classify_sam "$sam" "$uac"
+fi
+
+############################################
+# Full objectClass=* enumeration (windapsearch-style)
+############################################
+ldapsearch -x \
+  -H "$url" \
+  -b "$base_dn" \
+  -s sub \
+  -LLL \
+  -o nettimeout=15 \
+  -l 90 \
+  -z 5000 \
+  "(objectClass=*)" \
+  dn sAMAccountName objectClass \
+  >"$ALLOBJ_FILE" 2>/dev/null || true
+
+if [ -s "$CLASS_FILE" ]; then
+  cut -d'|' -f2 "$CLASS_FILE" | sed '/^$/d' | sort -u >"$KNOWN_SAM_FILE" 2>/dev/null || true
+else
+  : >"$KNOWN_SAM_FILE"
+fi
+
+############################################
+# Extract sam|objectClasses from all-objects
+############################################
+if [ -s "$ALLOBJ_FILE" ]; then
+  awk '
+    BEGIN { RS=""; FS="\n" }
+    {
+      sam=""; dn=""; ocs=""
+      for (i=1; i<=NF; i++) {
+        line=$i
+        if (line ~ /^dn:[[:space:]]*/) {
+          dn=line
+          sub(/^dn:[[:space:]]*/, "", dn)
+        } else if (line ~ /^sAMAccountName:[[:space:]]*/) {
+          sam=line
+          sub(/^sAMAccountName:[[:space:]]*/, "", sam)
+        } else if (line ~ /^objectClass:[[:space:]]*/) {
+          oc=line
+          sub(/^objectClass:[[:space:]]*/, "", oc)
+          if (ocs=="") { ocs=oc } else { ocs=ocs "," oc }
+        }
+      }
+      if (sam == "" && dn != "") {
+        cn = dn
+        sub(/,.*/, "", cn)
+        sub(/^[Cc][Nn]=/, "", cn)
+        sam = cn
+      }
+      if (sam=="") next
+      print sam "|" ocs
+    }
+  ' "$ALLOBJ_FILE" >"$ALL_ACCOUNTS_RAW" 2>/dev/null || true
+fi
+
+############################################
+# Extra accounts = in all-objects but not in CLASS_FILE
+############################################
+if [ -s "$ALL_ACCOUNTS_RAW" ]; then
+  while IFS='|' read -r acc_sam acc_ocs; do
+    [ -z "$acc_sam" ] && continue
+    if ! grep -qxF "$acc_sam" "$KNOWN_SAM_FILE" 2>/dev/null; then
+      echo "$acc_sam|${acc_ocs:-}" >>"$EXTRA_ACCOUNTS_FILE"
+    fi
+  done <"$ALL_ACCOUNTS_RAW"
+fi
+
+############################################
+# Classify extra accounts + detect hidden svc-* accounts
+############################################
+extra_accounts_count=0
+if [ -s "$EXTRA_ACCOUNTS_FILE" ]; then
+  while IFS='|' read -r extra_sam extra_ocs; do
+    [ -z "$extra_sam" ] && continue
+
+    ocs_l="$(printf '%s\n' "${extra_ocs:-}" | tr '[:upper:]' '[:lower:]')"
+    sam_l="${extra_sam,,}"
+
+    case "$ocs_l" in
+      *group*|*organizationalunit*|*container*)
+        continue
+        ;;
+    esac
+
+    is_account=0
+
+    case "$ocs_l" in
+      *user*|*person*|*inetorgperson*|*organizationalperson*|*msds-groupmanagedserviceaccount*)
+        is_account=1
+        ;;
+    esac
+
+    svc_like=0
+    if [[ "$sam_l" == svc-* || "$sam_l" == svc_* ]]; then
+      svc_like=1
+      [ "$is_account" -eq 0 ] && is_account=1
+    fi
+
+    [ "$is_account" -eq 0 ] && continue
+
+    extra_uac="$(
+      ldapsearch -x \
+        -H "$url" \
+        -b "$base_dn" \
+        -s sub \
+        -LLL \
+        -o nettimeout=8 \
+        -l 20 \
+        "(sAMAccountName=$extra_sam)" \
+        userAccountControl 2>/dev/null \
+      | awk -F': ' '/^userAccountControl:/{print $2; exit}'
+    )"
+
+    classify_sam "$extra_sam" "$extra_uac"
+
+    if [ "$svc_like" -eq 1 ]; then
+      echo "$extra_sam" >>"$HIDDEN_FILE"
+    fi
+
+    extra_accounts_count=$((extra_accounts_count + 1))
+  done <"$EXTRA_ACCOUNTS_FILE"
+fi
+
+############################################
+# Recompute HUMAN / SERVICE / ASREP counters
+############################################
+if [ -s "$CLASS_FILE" ]; then
+  human_count="$(grep -c '^HUMAN|' "$CLASS_FILE" 2>/dev/null || true)"
+  service_count="$(grep -c '^SERVICE|' "$CLASS_FILE" 2>/dev/null || true)"
+  asrep_count="$(grep -c 'ASREP_ROASTABLE' "$CLASS_FILE" 2>/dev/null || true)"
+
+  [ -z "$human_count" ] && human_count=0
+  [ -z "$service_count" ] && service_count=0
+  [ -z "$asrep_count" ] && asrep_count=0
+fi
+
+############################################
+### END OF EXTRACTED BLOCK
+############################################
+
+# Write counters back for ldap-master
+{
+    echo "HUMAN_COUNT=$human_count"
+    echo "SERVICE_COUNT=$service_count"
+    echo "ASREP_COUNT=$asrep_count"
+    echo "EXTRA_COUNT=$extra_accounts_count"
+} > "$LDAPDIR/ldap-accounts-status.txt"
