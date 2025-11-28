@@ -31,6 +31,7 @@
 #           groups-priv.txt             (high-priv group summary)
 #           all-objects.txt             (raw objectClass=* dump)
 #           extra-accounts.txt          (accounts only seen via objectClass=* search)
+#           hidden-accounts.txt         (svc-* style extras only seen via all-objects)
 #           summary.txt                 (human-friendly, high-signal view)
 #
 #   - Requires: ldapsearch (ldap-utils)
@@ -153,6 +154,7 @@ for PORT in "${ports[@]}"; do
   EXTRA_ACCOUNTS_FILE="$LDAPDIR/extra-accounts.txt"
   KNOWN_SAM_FILE="$LDAPDIR/known-sam.txt"
   ALL_ACCOUNTS_RAW="$LDAPDIR/all-accounts-raw.txt"
+  HIDDEN_FILE="$LDAPDIR/hidden-accounts.txt"
   SUMMARY_FILE="$LDAPDIR/summary.txt"
 
   : >"$ROOTDSE_FILE"
@@ -169,6 +171,7 @@ for PORT in "${ports[@]}"; do
   : >"$EXTRA_ACCOUNTS_FILE"
   : >"$KNOWN_SAM_FILE"
   : >"$ALL_ACCOUNTS_RAW"
+  : >"$HIDDEN_FILE"
   : >"$SUMMARY_FILE"
 
   port_label="$(ldap_port_label "$PORT")"
@@ -262,13 +265,13 @@ for PORT in "${ports[@]}"; do
       echo "[ Additional Accounts (objectClass=* only) ]"
       echo "  (no base DN; no objectClass=* enumeration)"
       echo
+      echo "[ Suspicious Hidden Accounts ]"
+      echo "  (no base DN; no objectClass=* enumeration)"
+      echo
       echo "[ Service Smells ]"
       echo "  Exchange:            unknown"
       echo
     } >"$SUMMARY_FILE"
-
-    # Even in this case, ldap-treasure could still pull minimal loot (RootDSE/etc),
-    # but since it expects all-objects and summary, skip for now to avoid noise.
 
     echo -e "${yellow}    [*]${end} ${purple}LDAP enumeration finished for${end} ${blue}${TARGET}:${PORT}${end} ${purple}(no base DN)${end}"
     continue
@@ -554,11 +557,11 @@ for PORT in "${ports[@]}"; do
 
   # Derive extra accounts: present in objectClass=* dump, but not in CLASS_FILE
   if [ -s "$ALL_ACCOUNTS_RAW" ]; then
-    while IFS='|' read -r sam_oc sam_ocs; do
-      sam_oc="${sam_oc:-}"
-      [ -z "$sam_oc" ] && continue
-      if ! grep -qxF "$sam_oc" "$KNOWN_SAM_FILE" 2>/dev/null; then
-        echo "$sam_oc|${sam_ocs:-}" >>"$EXTRA_ACCOUNTS_FILE"
+    while IFS='|' read -r acc_sam acc_ocs; do
+      acc_sam="${acc_sam:-}"
+      [ -z "$acc_sam" ] && continue
+      if ! grep -qxF "$acc_sam" "$KNOWN_SAM_FILE" 2>/dev/null; then
+        echo "$acc_sam|${acc_ocs:-}" >>"$EXTRA_ACCOUNTS_FILE"
       fi
     done <"$ALL_ACCOUNTS_RAW"
   fi
@@ -592,19 +595,36 @@ for PORT in "${ports[@]}"; do
           ;;
       esac
 
-      # 2) Very conservative svc-* heuristic; samAccountName never has spaces,
-      #    but we already filtered out group/OU/container objectClasses above.
-      if [ "$is_account" -eq 0 ]; then
-        if [[ "$sam_l" == svc-* || "$sam_l" == svc_* ]]; then
-          is_account=1
-        fi
+      # 2) Very conservative svc-* heuristic
+      svc_like=0
+      if [[ "$sam_l" == svc-* || "$sam_l" == svc_* ]]; then
+        svc_like=1
+        [ "$is_account" -eq 0 ] && is_account=1
       fi
 
       [ "$is_account" -eq 0 ] && continue
 
-      # No userAccountControl here (we don't have it in the all-objects pass),
-      # so state will be "unknown" in classify_sam.
-      classify_sam "$extra_sam" ""
+      # Try to pull userAccountControl specifically for this extra account
+      extra_uac="$(
+        ldapsearch -x \
+          -H "$url" \
+          -b "$base_dn" \
+          -s sub \
+          -LLL \
+          -o nettimeout=8 \
+          -l 20 \
+          "(sAMAccountName=$extra_sam)" \
+          userAccountControl 2>/dev/null \
+        | awk -F': ' '/^userAccountControl:/{print $2; exit}'
+      )"
+
+      classify_sam "$extra_sam" "$extra_uac"
+
+      # If it's svc-like and only visible via all-objects, mark as hidden/suspicious
+      if [ "$svc_like" -eq 1 ]; then
+        echo "$extra_sam" >>"$HIDDEN_FILE"
+      fi
+
       extra_accounts_count=$((extra_accounts_count + 1))
     done <"$EXTRA_ACCOUNTS_FILE"
   fi
@@ -679,6 +699,21 @@ for PORT in "${ports[@]}"; do
   [ -z "$asrep_count" ] && asrep_count=0
   [ -z "$interesting_count" ] && interesting_count=0
   [ -z "$extra_accounts_count" ] && extra_accounts_count=0
+
+  # --- Console highlight for AS-REP roastables ---
+  if [ "$asrep_count" -gt 0 ] && [ -s "$CLASS_FILE" ]; then
+    echo -e "${green}    [*] AS-REP roastable accounts detected on${end} ${blue}${TARGET}:${PORT}${end}"
+    awk -F'|' '$4=="ASREP_ROASTABLE"{ printf "        - %s (%s)\n", $2, $3 }' "$CLASS_FILE"
+  fi
+
+  # --- Console highlight for hidden svc-* accounts ---
+  if [ -s "$HIDDEN_FILE" ]; then
+    echo -e "${yellow}    [*] Suspicious hidden svc-* accounts (only in objectClass=* dump) on${end} ${blue}${TARGET}:${PORT}${end}"
+    sort -u "$HIDDEN_FILE" | while IFS= read -r hs; do
+      [ -z "$hs" ] && continue
+      echo -e "        - ${red}${hs}${end}"
+    done
+  fi
 
   # --- Build human-friendly summary.txt ---
 
@@ -801,12 +836,36 @@ for PORT in "${ports[@]}"; do
   echo >>"$SUMMARY_FILE"
 
   {
+    echo "[ Suspicious Hidden Accounts ]"
+  } >>"$SUMMARY_FILE"
+  if [ -s "$HIDDEN_FILE" ] && [ -s "$CLASS_FILE" ]; then
+    sort -u "$HIDDEN_FILE" | while IFS= read -r hs; do
+      [ -z "$hs" ] && continue
+      line="$(grep -m1 "|${hs}|" "$CLASS_FILE" 2>/dev/null || true)"
+      [ -z "$line" ] && continue
+      typ="$(printf '%s\n' "$line" | cut -d'|' -f1)"
+      state="$(printf '%s\n' "$line" | cut -d'|' -f3)"
+      asrep_flag="$(printf '%s\n' "$line" | cut -d'|' -f4)"
+      [ -z "$typ" ] && typ="UNKNOWN"
+      [ -z "$state" ] && state="unknown"
+      if [ "$asrep_flag" = "ASREP_ROASTABLE" ]; then
+        printf "  %-22s %s (%s, %s)\n" "$hs" "$typ" "$state" "AS-REP roastable" >>"$SUMMARY_FILE"
+      else
+        printf "  %-22s %s (%s)\n" "$hs" "$typ" "$state" >>"$SUMMARY_FILE"
+      fi
+    done
+  else
+    echo "  (none detected)" >>"$SUMMARY_FILE"
+  fi
+  echo >>"$SUMMARY_FILE"
+
+  {
     echo "[ Service Smells ]"
     echo "  Exchange:            ${exchange_smell}"
     echo
   } >>"$SUMMARY_FILE"
 
-  # --- NEW: fire ldap-treasure for this port ---
+  # --- fire ldap-treasure for this port ---
   if [ -x "$ROOTDIR/modules/ldap/ldap-treasure" ]; then
     "$ROOTDIR/modules/ldap/ldap-treasure" "$OUTDIR" "$PORT" 2>/dev/null || \
       echo -e "${yellow}    [!]${end} ${purple}ldap-treasure encountered an error on${end} ${blue}${TARGET}:${PORT}${end}"

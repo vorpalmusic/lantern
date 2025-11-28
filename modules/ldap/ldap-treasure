@@ -2,6 +2,26 @@
 # ldap-treasure — extract reusable loot from LDAP artifacts
 # Usage:
 #   ldap-treasure OUTDIR PORT
+#
+# Expects:
+#   OUTDIR/ldap/<PORT>/ artifacts produced by ldap-master:
+#     summary.txt, users.txt, groups.txt, computers.txt,
+#     spn-accounts.txt, all-objects.txt, users-classified.txt,
+#     basedn.txt, hidden-accounts.txt (if present), etc.
+#
+# Emits:
+#   OUTDIR/ldap/<PORT>/treasure/:
+#     users.txt        — usernames / sAMAccountNames
+#     emails.txt       — emails / UPNs
+#     spns.txt         — SPNs (Kerberoast candidates)
+#     groups.txt       — DNs of high-priv group members
+#     hosts.txt        — hostnames and machine accounts (ending in $)
+#     domains.txt      — domains derived from base DN
+#     dn.txt           — all distinguishedNames
+#     hashes.txt       — generic hex hashes (best-effort)
+#     creds.txt        — description fields that smell like creds
+#     urls.txt         — http(s) URLs found in LDAP
+#     svc_hidden.txt   — svc-* style accounts only visible via objectClass=* (major targets)
 
 ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../.." >/dev/null 2>&1 && pwd)"
 . "$ROOTDIR/lib/colors"
@@ -31,6 +51,7 @@ COMPUTERS_FILE="$LDAPDIR/computers.txt"
 SPN_FILE="$LDAPDIR/spn-accounts.txt"
 CLASS_FILE="$LDAPDIR/users-classified.txt"
 BASEDN_FILE="$LDAPDIR/basedn.txt"
+HIDDEN_FILE="$LDAPDIR/hidden-accounts.txt"
 
 # --- temp files ---
 u="$(mktemp)"       # users
@@ -43,6 +64,7 @@ m="$(mktemp)"       # hosts / machine accounts
 d="$(mktemp)"       # domains
 r="$(mktemp)"       # URLs
 n="$(mktemp)"       # DNs
+t="$(mktemp)"       # svc-hidden / high-value LDAP targets
 
 ##############################################
 ### USERS
@@ -173,6 +195,16 @@ for f in "$USERS_FILE" "$GROUPS_FILE" "$COMPUTERS_FILE"; do
 done
 
 ##############################################
+### SUSPICIOUS HIDDEN SERVICE ACCOUNTS
+### (svc-* only visible via objectClass=* enumeration)
+##############################################
+
+if [ -s "$HIDDEN_FILE" ]; then
+  # Just the SAMs; semantics: "prime LDAP-derived candidates for Kerberos probing"
+  sort -u "$HIDDEN_FILE" >> "$t"
+fi
+
+##############################################
 ### WRITE FINAL FILES
 ##############################################
 
@@ -188,7 +220,12 @@ write "$n" "$TREASURE_DIR/dn.txt"
 write "$h" "$TREASURE_DIR/hashes.txt"
 write "$c" "$TREASURE_DIR/creds.txt"
 write "$r" "$TREASURE_DIR/urls.txt"
+write "$t" "$TREASURE_DIR/svc_hidden.txt"
 
-rm -f "$u" "$e" "$s" "$g" "$m" "$d" "$n" "$h" "$c" "$r"
+rm -f "$u" "$e" "$s" "$g" "$m" "$d" "$n" "$h" "$c" "$r" "$t"
 
-echo -e "${cyan}    [*] [ldap-treasure]: loot extracted for LDAP${end} ${blue}port $PORT${end}"
+if [ -s "$TREASURE_DIR/svc_hidden.txt" ]; then
+  echo -e "${yellow}    [*] [ldap-treasure]: suspicious hidden svc-* accounts saved to${end} ${blue}treasure/svc_hidden.txt${end}"
+else
+  echo -e "${cyan}    [*] [ldap-treasure]: loot extracted for LDAP${end} ${blue}port $PORT${end}"
+fi
