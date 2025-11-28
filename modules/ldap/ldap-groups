@@ -11,7 +11,7 @@
 #   OUTDIR/ldap/<PORT>/groups-priv.txt        (high-priv group summary)
 #   OUTDIR/ldap/<PORT>/ldap-groups-status.txt (EXCHANGE_SMELL=YES|NO)
 
-ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")")/../.." >/dev/null 2>&1 && pwd)"
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../.." >/dev/null 2>&1 && pwd)"
 . "$ROOTDIR/lib/colors"
 
 OUTDIR="${1:-}"
