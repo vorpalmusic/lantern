@@ -120,7 +120,12 @@ ftp_pid=""
 dns_pid=""
 ldap_pid=""
 
-echo -e "${yellow}[*]${end} ${purple}Launching service modules in parallel:${end}"
+ssh_watch_pid=""
+ftp_watch_pid=""
+dns_watch_pid=""
+ldap_watch_pid=""
+
+echo -e "\n${yellow}[*]${end} ${purple}Launching service modules in parallel:${end}"
 
 # --- SSH module (runs fully parallel, printed by a polling helper) ---
 if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
@@ -139,6 +144,7 @@ if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
       cat "$LOGDIR/ssh.log"
     fi
   ) &
+  ssh_watch_pid=$!
 
 elif [ "$has_ssh" = true ] && [ ! -x "$SSH_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}SSH detected but ssh-master not found at${end} ${blue}$SSH_MASTER${end}"
@@ -160,6 +166,7 @@ if [ "$has_ftp" = true ] && [ -n "$ftp_port" ] && [ -x "$FTP_MASTER" ]; then
       cat "$LOGDIR/ftp.log"
     fi
   ) &
+  ftp_watch_pid=$!
 
 elif [ "$has_ftp" = true ] && [ -z "$ftp_port" ]; then
   echo -e "${yellow}[!]${end} ${purple}FTP detected in XML but no port resolved; skipping ftp-master.${end}"
@@ -183,6 +190,7 @@ if [ "$has_dns" = true ] && [ -x "$DNS_MASTER" ]; then
       cat "$LOGDIR/dns.log"
     fi
   ) &
+  dns_watch_pid=$!
 
 elif [ "$has_dns" = true ] && [ ! -x "$DNS_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}DNS detected but dns-master not found at${end} ${blue}$DNS_MASTER${end}"
@@ -193,7 +201,7 @@ if [ "$has_ldap" = true ] && [ -x "$LDAP_MASTER" ]; then
   echo -e "${yellow}  [-]${end} ${purple}Starting LDAP module on port(s):${end} ${blue}${ldap_ports_str:-<default>}${end}"
   # ldap-master signature: ldap-master OUTDIR TARGET [PORTS]
   LDAP_PORTS="$("$ROOTDIR/modules/ldap/ldap-ports" "$PORTS")"
-  "$LDAP_MASTER" "$OUTDIR" "$TARGET" "$LDAP_PORTS" &
+  "$LDAP_MASTER" "$OUTDIR" "$TARGET" "$LDAP_PORTS" >"$LOGDIR/ldap.log" 2>&1 &
   ldap_pid=$!
 
   (
@@ -206,6 +214,7 @@ if [ "$has_ldap" = true ] && [ -x "$LDAP_MASTER" ]; then
       cat "$LOGDIR/ldap.log"
     fi
   ) &
+  ldap_watch_pid=$!
 
 elif [ "$has_ldap" = true ] && [ ! -x "$LDAP_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}LDAP detected but ldap-master not found at${end} ${blue}$LDAP_MASTER${end}"
@@ -267,9 +276,26 @@ if [ -n "$ldap_pid" ]; then
   wait "$ldap_pid" 2>/dev/null || true
 fi
 
-# --- Run Treasure aggregation (cheap, after all modules) ---
+# --- Also ensure all watcher subshells have finished printing blocks ---
+if [ -n "$ssh_watch_pid" ]; then
+  wait "$ssh_watch_pid" 2>/dev/null || true
+fi
+
+if [ -n "$ftp_watch_pid" ]; then
+  wait "$ftp_watch_pid" 2>/dev/null || true
+fi
+
+if [ -n "$dns_watch_pid" ]; then
+  wait "$dns_watch_pid" 2>/dev/null || true
+fi
+
+if [ -n "$ldap_watch_pid" ]; then
+  wait "$ldap_watch_pid" 2>/dev/null || true
+fi
+
+# --- Run Treasure aggregation (after all module blocks are printed) ---
 if [ -x "$TREASURE" ]; then
-  echo -e "${yellow}[*]${end} ${purple}Treasure Goblin deployed...${end}"
+  echo -e "\n${yellow}[*]${end} ${purple}Treasure Goblin deployed...${end}"
   "$TREASURE" "$OUTDIR"
 fi
 

@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# ldap-reporter — build a single aggregated LDAP fragment for reporter
+# Usage:
+#   ldap-reporter OUTDIR
+#
+# Expects:
+#   OUTDIR/ldap/<PORT>/summary.txt + other LDAP artifacts
+# Emits:
+#   HTML fragment to stdout (or nothing if no LDAP dirs)
+
+OUTDIR="$1"
+[ -n "$OUTDIR" ] || exit 0
+
+LDAPDIR="$OUTDIR/ldap"
+[ -d "$LDAPDIR" ] || exit 0
+
+# --- small helpers (local to this helper) ---
+
+html_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+emit_links() {
+  local sep=""
+  local item
+  for item in "$@"; do
+    [ -n "$item" ] || continue
+    printf "%s%s" "$sep" "$item"
+    sep=" | "
+  done
+}
+
+# relpath is relative to OUTDIR (same convention as scripts/reporter)
+make_link_if() {
+  local label="$1" relpath="$2" mode="${3:-nonempty}"
+  local abspath="$OUTDIR/$relpath"
+
+  if [ "$mode" = "allow_empty" ]; then
+    [ -e "$abspath" ] || return 0
+  else
+    [ -s "$abspath" ] || return 0
+  fi
+
+  printf '<a href="../%s">%s</a>' "$relpath" "$label"
+}
+
+# --- collect LDAP ports under OUTDIR/ldap/* ---
+
+ports=()
+while IFS= read -r d; do
+  ports+=("$d")
+done < <(find "$LDAPDIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n)
+
+[ ${#ports[@]} -eq 0 ] && exit 0
+
+primary_port="${ports[0]}"
+primary_summary="$LDAPDIR/$primary_port/summary.txt"
+
+# --- Directory overview from primary port ---
+
+DomainDN=""
+ForestDN=""
+IsAD=""
+
+if [ -s "$primary_summary" ]; then
+  DomainDN="$(grep -m1 '^Domain DN:' "$primary_summary" 2>/dev/null | sed 's/.*Domain DN:[[:space:]]*//')"
+  ForestDN="$(grep -m1 '^Forest DN:' "$primary_summary" 2>/dev/null | sed 's/.*Forest DN:[[:space:]]*//')"
+  IsAD="$(grep -m1 '^Is Active Directory:' "$primary_summary" 2>/dev/null | sed 's/.*Is Active Directory:[[:space:]]*//')"
+fi
+
+esc_domain="$(printf '%s' "$DomainDN" | html_escape)"
+esc_forest="$(printf '%s' "$ForestDN" | html_escape)"
+esc_isad="$(printf '%s' "$IsAD" | html_escape)"
+
+# --- emit fragment HTML ---
+
+{
+  echo '<h3>LDAP Summary</h3>'
+  echo '<div class="lantern-port">'
+  echo '  <h4>Directory Overview</h4>'
+  echo '  <div class="lantern-meta">'
+
+  # Domain / Forest / AD on one line if present
+  if [ -n "$esc_domain" ]; then
+    printf '    <strong>Domain DN:</strong> %s' "$esc_domain"
+  fi
+  if [ -n "$esc_forest" ]; then
+    if [ -n "$esc_domain" ]; then
+      printf ' &nbsp;•&nbsp; '
+    fi
+    printf '<strong>Forest DN:</strong> %s' "$esc_forest"
+  fi
+  if [ -n "$esc_isad" ]; then
+    if [ -n "$esc_domain$esc_forest" ]; then
+      printf ' &nbsp;•&nbsp; '
+    fi
+    printf '<strong>Active Directory:</strong> %s' "$esc_isad"
+  fi
+  echo
+  echo '  </div>'
+
+  # --------- Preview block from primary port (summary + users) ---------
+  pdir="$LDAPDIR/$primary_port"
+  primary_users="$pdir/users.txt"
+
+  if [ -s "$primary_summary" ] || [ -s "$primary_users" ]; then
+    echo '  <details open style="margin-top:.4rem"><summary>LDAP Enumeration Preview (primary port)</summary><pre class="lantern-pre-twocol">'
+    if [ -s "$primary_summary" ]; then
+      echo '---- summary.txt ----' | html_escape
+      printf '\n'
+      sed -n '1,220p' "$primary_summary" | html_escape
+      printf '\n\n'
+    fi
+    if [ -s "$primary_users" ]; then
+      echo '---- users.txt ----' | html_escape
+      printf '\n'
+      sed -n '1,220p' "$primary_users" | html_escape
+      printf '\n\n'
+    fi
+    echo '  </pre></details>'
+  fi
+
+  # --------- Per-port status + artifact links (moved AFTER preview) ---------
+  echo '  <div class="lantern-meta"><strong>Per-port status:</strong></div>'
+
+  for port in "${ports[@]}"; do
+    portdir="$LDAPDIR/$port"
+    [ -d "$portdir" ] || continue
+    summary="$portdir/summary.txt"
+
+    anon_bind="unknown"
+    if [ -s "$summary" ]; then
+      # handle either "Anonymous Bind" or "Anonymous bind"
+      anon_bind="$(grep -im1 '^Anonymous bind:' "$summary" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')"
+      [ -z "$anon_bind" ] && anon_bind="unknown"
+    fi
+
+    esc_anon="$(printf '%s' "$anon_bind" | html_escape)"
+
+    # Per-port artifacts
+    link_items=()
+    link_items+=("$(make_link_if 'summary.txt'          "ldap/$port/summary.txt")")
+    link_items+=("$(make_link_if 'rootdse.txt'          "ldap/$port/rootdse.txt" allow_empty)")
+    link_items+=("$(make_link_if 'basedn.txt'           "ldap/$port/basedn.txt" allow_empty)")
+    link_items+=("$(make_link_if 'domain.txt'           "ldap/$port/domain.txt" allow_empty)")
+    link_items+=("$(make_link_if 'users.txt'            "ldap/$port/users.txt" allow_empty)")
+    link_items+=("$(make_link_if 'groups.txt'           "ldap/$port/groups.txt" allow_empty)")
+    link_items+=("$(make_link_if 'computers.txt'        "ldap/$port/computers.txt" allow_empty)")
+    link_items+=("$(make_link_if 'spn-accounts.txt'     "ldap/$port/spn-accounts.txt" allow_empty)")
+    link_items+=("$(make_link_if 'interesting.txt'      "ldap/$port/interesting.txt" allow_empty)")
+    link_items+=("$(make_link_if 'users-classified.txt' "ldap/$port/users-classified.txt" allow_empty)")
+    link_items+=("$(make_link_if 'groups-priv.txt'      "ldap/$port/groups-priv.txt" allow_empty)")
+    link_items+=("$(make_link_if 'all-objects.txt'      "ldap/$port/all-objects.txt" allow_empty)")
+    link_items+=("$(make_link_if 'extra-accounts.txt'   "ldap/$port/extra-accounts.txt" allow_empty)")
+
+    # Any extra LDAP artifacts not in the known list
+    shopt -s nullglob
+    for fpath in "$portdir"/*; do
+      [ -f "$fpath" ] || continue
+      fbn="$(basename "$fpath")"
+      case "$fbn" in
+        summary.txt|rootdse.txt|basedn.txt|domain.txt|users.txt|groups.txt|computers.txt|spn-accounts.txt|interesting.txt|users-classified.txt|groups-priv.txt|all-objects.txt|extra-accounts.txt)
+          continue
+          ;;
+      esac
+      rel="ldap/$port/$fbn"
+      link_items+=("$(make_link_if "$fbn" "$rel" allow_empty)")
+    done
+    shopt -u nullglob
+
+    links="$(emit_links "${link_items[@]}")"
+
+    echo '  <div class="lantern-meta">'
+    printf '    <strong>Port <code>%s</code>:</strong> Anonymous bind: %s' "$port" "$esc_anon"
+    if [ -n "$links" ]; then
+      printf '<br>'
+      printf ' &nbsp;•&nbsp; <strong>Artifacts:</strong> %s' "$links"
+    fi
+    echo
+    echo '  </div>'
+  done
+
+  echo '</div>'
+}
