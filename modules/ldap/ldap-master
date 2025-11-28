@@ -266,6 +266,11 @@ for PORT in "${ports[@]}"; do
       echo "  Exchange:            unknown"
       echo
     } >"$SUMMARY_FILE"
+
+    # Even in this case, ldap-treasure could still pull minimal loot (RootDSE/etc),
+    # but since it expects all-objects and summary, skip for now to avoid noise.
+
+    echo -e "${yellow}    [*]${end} ${purple}LDAP enumeration finished for${end} ${blue}${TARGET}:${PORT}${end} ${purple}(no base DN)${end}"
     continue
   fi
 
@@ -800,6 +805,14 @@ for PORT in "${ports[@]}"; do
     echo "  Exchange:            ${exchange_smell}"
     echo
   } >>"$SUMMARY_FILE"
+
+  # --- NEW: fire ldap-treasure for this port ---
+  if [ -x "$ROOTDIR/modules/ldap/ldap-treasure" ]; then
+    "$ROOTDIR/modules/ldap/ldap-treasure" "$OUTDIR" "$PORT" 2>/dev/null || \
+      echo -e "${yellow}    [!]${end} ${purple}ldap-treasure encountered an error on${end} ${blue}${TARGET}:${PORT}${end}"
+  else
+    echo -e "${yellow}    [!]${end} ${purple}ldap-treasure not found or not executable; skipping loot extraction for${end} ${blue}${TARGET}:${PORT}${end}"
+  fi
 
   echo -e "${yellow}    [*]${end} ${purple}LDAP enumeration finished for${end} ${blue}${TARGET}:${PORT}${end} ${purple}(users: $users_count, groups: $groups_count, computers: $computers_count, SPNs: $spn_count)${end}"
 done

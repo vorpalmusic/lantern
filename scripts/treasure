@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-## treasure
+## treasure — aggregate reusable loot across modules
 
 ### GRAB ROOTDIR FOR LIBRARIES
-rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." >/dev/null 2>&1 && pwd)"
-. $rootdir/lib/colors
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/.. >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
 
 OUTDIR="${1:-}"
 
@@ -15,31 +15,82 @@ fi
 TREASURE_DIR="$OUTDIR/treasure"
 mkdir -p "$TREASURE_DIR"
 
+# tmp files
 tmp_emails="$(mktemp)"
 tmp_domains="$(mktemp)"
 tmp_cves="$(mktemp)"
 tmp_users="$(mktemp)"
+tmp_hashes="$(mktemp)"
+tmp_creds="$(mktemp)"
+tmp_hosts="$(mktemp)"
+tmp_urls="$(mktemp)"
+
+# --- helper: collect from module treasure dirs + legacy locations ---
+collect_simple() {
+  local pattern="$1"   # e.g. */treasure/emails.txt
+  local outfile="$2"   # tmp file
+  shift 2
+  local extra_find_args=("$@")
+
+  # Canonical treasure files
+  find "$OUTDIR" -type f -path "$pattern" -exec cat {} + 2>/dev/null >> "$outfile" || true
+
+  # Optional legacy extras (if any provided)
+  if [ "${#extra_find_args[@]}" -gt 0 ]; then
+    # shellcheck disable=SC2068
+    find "$OUTDIR" ${extra_find_args[@]} -exec cat {} + 2>/dev/null >> "$outfile" || true
+  fi
+}
 
 # --- Collect emails ---
-find "$OUTDIR/http" -type f -name emails.txt -exec cat {} + 2>/dev/null >> "$tmp_emails"
+#  - New:  */treasure/emails.txt from any module
+#  - Legacy: http/*/emails.txt
+collect_simple "*/treasure/emails.txt" "$tmp_emails" \
+  -path "$OUTDIR/http/*/emails.txt"
 
-# --- Collect domains ---
-find "$OUTDIR/http" -type f -name hosts_from_body.txt -exec cat {} + 2>/dev/null >> "$tmp_domains"
+# --- Collect domains/hosts from HTTP + module treasure ---
+#  - New:  */treasure/domains.txt
+#  - Legacy: http/*/hosts_from_body.txt
+collect_simple "*/treasure/domains.txt" "$tmp_domains" \
+  -path "$OUTDIR/http/*/hosts_from_body.txt"
 
 # --- Collect CVEs ---
+#  - New:  */treasure/cves.txt
+#  - Fallback: grep every CVE in OUTDIR
+collect_simple "*/treasure/cves.txt" "$tmp_cves"
 grep -RhoE 'CVE-[0-9]{4}-[0-9]+' "$OUTDIR" 2>/dev/null >> "$tmp_cves" || true
 
-# --- Collect users from WordPress ---
+# --- Collect users ---
+#  - New:  */treasure/users.txt  (LDAP, HTTP, FTP, SSH, etc)
+#  - Legacy: WordPress "User: ..." lines under OUTDIR/http
+collect_simple "*/treasure/users.txt" "$tmp_users"
 grep -RhoE '^User: .+' "$OUTDIR/http" 2>/dev/null \
   | sed 's/^User: //' >> "$tmp_users" || true
 
-# --- Write final sorted artifacts ---
-sort -u "$tmp_emails"   > "$TREASURE_DIR/emails.txt"   || true
-sort -u "$tmp_domains"  > "$TREASURE_DIR/domains.txt"  || true
-sort -u "$tmp_cves"     > "$TREASURE_DIR/cves.txt"     || true
-sort -u "$tmp_users"    > "$TREASURE_DIR/users.txt"    || true
+# --- Collect hashes ---
+collect_simple "*/treasure/hashes.txt" "$tmp_hashes"
 
-rm -f "$tmp_emails" "$tmp_domains" "$tmp_cves" "$tmp_users"
+# --- Collect creds ---
+collect_simple "*/treasure/creds.txt" "$tmp_creds"
+
+# --- Collect hosts/IPs ---
+collect_simple "*/treasure/hosts.txt" "$tmp_hosts"
+
+# --- Collect URLs ---
+collect_simple "*/treasure/urls.txt" "$tmp_urls"
+
+# --- Write final sorted artifacts (deduped) ---
+sort -u "$tmp_emails"   > "$TREASURE_DIR/emails.txt"   2>/dev/null || : 
+sort -u "$tmp_domains"  > "$TREASURE_DIR/domains.txt"  2>/dev/null || : 
+sort -u "$tmp_cves"     > "$TREASURE_DIR/cves.txt"     2>/dev/null || : 
+sort -u "$tmp_users"    > "$TREASURE_DIR/users.txt"    2>/dev/null || : 
+sort -u "$tmp_hashes"   > "$TREASURE_DIR/hashes.txt"   2>/dev/null || : 
+sort -u "$tmp_creds"    > "$TREASURE_DIR/creds.txt"    2>/dev/null || : 
+sort -u "$tmp_hosts"    > "$TREASURE_DIR/hosts.txt"    2>/dev/null || : 
+sort -u "$tmp_urls"     > "$TREASURE_DIR/urls.txt"     2>/dev/null || : 
+
+rm -f "$tmp_emails" "$tmp_domains" "$tmp_cves" "$tmp_users" \
+      "$tmp_hashes" "$tmp_creds" "$tmp_hosts" "$tmp_urls"
 
 # --- HTML fragment ---
 FRAGDIR="$OUTDIR/report/fragments"
@@ -50,7 +101,7 @@ FRAG="$FRAGDIR/25-treasure.html"
   echo '<h3>Treasure</h3>'
   echo '<div class="lantern-port">'
   echo '<ul>'
-  for item in emails domains cves users; do
+  for item in emails domains cves users hashes creds hosts urls; do
     f="$TREASURE_DIR/$item.txt"
     if [ -s "$f" ]; then
       count=$(wc -l < "$f")

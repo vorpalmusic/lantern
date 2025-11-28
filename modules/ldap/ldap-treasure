@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# ldap-treasure — extract reusable loot from LDAP artifacts
+# Usage:
+#   ldap-treasure OUTDIR PORT
+
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../.." >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
+
+OUTDIR="${1:-}"
+PORT="${2:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$PORT" ]; then
+  echo "[!] ldap-treasure: Usage: ldap-treasure OUTDIR PORT" >&2
+  exit 2
+fi
+
+LDAPDIR="$OUTDIR/ldap/$PORT"
+if [ ! -d "$LDAPDIR" ]; then
+  echo "[*] ldap-treasure: No LDAP dir: $LDAPDIR"
+  exit 0
+fi
+
+TREASURE_DIR="$LDAPDIR/treasure"
+mkdir -p "$TREASURE_DIR"
+
+SUMMARY_FILE="$LDAPDIR/summary.txt"
+ALLOBJ_FILE="$LDAPDIR/all-objects.txt"
+USERS_FILE="$LDAPDIR/users.txt"
+GROUPS_FILE="$LDAPDIR/groups.txt"
+COMPUTERS_FILE="$LDAPDIR/computers.txt"
+SPN_FILE="$LDAPDIR/spn-accounts.txt"
+CLASS_FILE="$LDAPDIR/users-classified.txt"
+BASEDN_FILE="$LDAPDIR/basedn.txt"
+
+# --- temp files ---
+u="$(mktemp)"       # users
+e="$(mktemp)"       # emails / UPNs
+s="$(mktemp)"       # SPNs
+g="$(mktemp)"       # high-priv group members
+h="$(mktemp)"       # hashes
+c="$(mktemp)"       # creds (password-like strings)
+m="$(mktemp)"       # hosts / machine accounts
+d="$(mktemp)"       # domains
+r="$(mktemp)"       # URLs
+n="$(mktemp)"       # DNs
+
+##############################################
+### USERS
+##############################################
+
+# Preferred: users-classified.txt (TYPE|SAM|STATE|ASREP)
+if [ -s "$CLASS_FILE" ]; then
+  cut -d'|' -f2 "$CLASS_FILE" | sed '/^$/d' >> "$u"
+fi
+
+# Fallback: summary.txt (first column in Human/Service sections)
+if [ -s "$SUMMARY_FILE" ]; then
+  awk '
+    /^\[ Human Users \]/      { in=1; next }
+    /^\[ Service Accounts \]/ { in=1; next }
+    /^\[/                     { in=0; next }
+    in == 1 && $1 ~ /^[[:alnum:]._-]+$/ { print $1 }
+  ' "$SUMMARY_FILE" >> "$u"
+fi
+
+# Extra fallback: sAMAccountName from all-objects
+if [ -s "$ALLOBJ_FILE" ]; then
+  grep -i '^sAMAccountName:' "$ALLOBJ_FILE" 2>/dev/null \
+    | awk -F': *' '{print $2}' >> "$u"
+fi
+
+##############################################
+### EMAILS / UPNs
+##############################################
+
+if [ -s "$USERS_FILE" ]; then
+  grep -Ei '^(mail|userPrincipalName):' "$USERS_FILE" 2>/dev/null \
+    | awk -F': *' '{print $2}' \
+    | grep -Ei '^[^ @]+@[^ @]+\.[^ @]+$' >> "$e" 2>/dev/null || true
+fi
+
+##############################################
+### SPNs (Kerberoast targets)
+##############################################
+
+if [ -s "$SPN_FILE" ]; then
+  awk -F': *' '/^servicePrincipalName:/ {print $2}' "$SPN_FILE" 2>/dev/null >> "$s"
+fi
+
+##############################################
+### HIGH PRIVILEGE GROUP MEMBERS
+### (DAs, EAs, SAs, etc) from groups.txt
+##############################################
+
+if [ -s "$GROUPS_FILE" ]; then
+  awk '
+    BEGIN { RS=""; FS="\n" }
+    /CN=Domain Admins|CN=Enterprise Admins|CN=Schema Admins/ {
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^member:[[:space:]]*/) {
+          m=$i
+          sub(/^member:[[:space:]]*/, "", m)
+          print m
+        }
+      }
+    }
+  ' "$GROUPS_FILE" 2>/dev/null >> "$g"
+fi
+
+##############################################
+### HOSTS / MACHINE ACCOUNTS
+##############################################
+
+# From computers.txt: dNSHostName and machine sAMAccountName
+if [ -s "$COMPUTERS_FILE" ]; then
+  awk -F': *' '/^dNSHostName:/ {print $2}' "$COMPUTERS_FILE" 2>/dev/null >> "$m"
+  awk -F': *' '/^sAMAccountName:/ {print $2}' "$COMPUTERS_FILE" 2>/dev/null \
+    | grep '\$$' >> "$m" || true
+fi
+
+# From users-classified: SYSTEM accounts ending in $
+if [ -s "$CLASS_FILE" ]; then
+  awk -F'|' '$1=="SYSTEM"{print $2}' "$CLASS_FILE" 2>/dev/null \
+    | grep '\$$' >> "$m" || true
+fi
+
+##############################################
+### DOMAINS
+##############################################
+
+# From basedn.txt -> htb.local style
+if [ -s "$BASEDN_FILE" ]; then
+  base_dn="$(head -n1 "$BASEDN_FILE")"
+  if [ -n "$base_dn" ]; then
+    echo "$base_dn" | sed 's/DC=//Ig; s/,/./g' >> "$d"
+  fi
+fi
+
+##############################################
+### DNs (useful for pre-gen bind paths, lockpick, etc.)
+##############################################
+
+if [ -s "$ALLOBJ_FILE" ]; then
+  grep -Ei '^dn:' "$ALLOBJ_FILE" 2>/dev/null | awk -F': *' '{print $2}' >> "$n"
+fi
+
+##############################################
+### HASHES
+### (best-effort: generic hex lengths across LDAP artifacts)
+##############################################
+
+for f in "$USERS_FILE" "$GROUPS_FILE" "$COMPUTERS_FILE" "$ALLOBJ_FILE"; do
+  [ -s "$f" ] || continue
+  grep -Eio '([a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64}|[a-f0-9]{128})' "$f" 2>/dev/null >> "$h" || true
+done
+
+##############################################
+### CREDS (description fields with pwd/pass/cred/secret)
+##############################################
+
+for f in "$USERS_FILE" "$GROUPS_FILE" "$COMPUTERS_FILE"; do
+  [ -s "$f" ] || continue
+  grep -Ei '^description:.*(pass|pwd|cred|secret)' "$f" 2>/dev/null >> "$c" || true
+done
+
+##############################################
+### URLS (any HTTP/HTTPS in LDAP descriptions/etc.)
+##############################################
+
+for f in "$USERS_FILE" "$GROUPS_FILE" "$COMPUTERS_FILE"; do
+  [ -s "$f" ] || continue
+  grep -Eio '(https?://[^ ]+)' "$f" 2>/dev/null >> "$r" || true
+done
+
+##############################################
+### WRITE FINAL FILES
+##############################################
+
+write() { sort -u "$1" > "$2" 2>/dev/null || : ; }
+
+write "$u" "$TREASURE_DIR/users.txt"
+write "$e" "$TREASURE_DIR/emails.txt"
+write "$s" "$TREASURE_DIR/spns.txt"
+write "$g" "$TREASURE_DIR/groups.txt"
+write "$m" "$TREASURE_DIR/hosts.txt"
+write "$d" "$TREASURE_DIR/domains.txt"
+write "$n" "$TREASURE_DIR/dn.txt"
+write "$h" "$TREASURE_DIR/hashes.txt"
+write "$c" "$TREASURE_DIR/creds.txt"
+write "$r" "$TREASURE_DIR/urls.txt"
+
+rm -f "$u" "$e" "$s" "$g" "$m" "$d" "$n" "$h" "$c" "$r"
+
+echo -e "${cyan}    [*] [ldap-treasure]: loot extracted for LDAP${end} ${blue}port $PORT${end}"
