@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# ldap-ports — derive LDAP ports to probe from full port list
+# Usage:
+#   ldap-ports "PORTS_CSV"
+#
+# Logic:
+#   - If DC-ish ports (88,135,445) are present, force 389,636,3268,3269.
+#   - Else, keep only LDAP-ish ports already in the CSV.
+#   - If resulting list is empty, fallback to 389.
+
+ports_csv="${1:-}"
+
+# If nothing provided at all, just use 389
+[ -z "$ports_csv" ] && { echo "389"; exit 0; }
+
+dc_hint=0
+declare -A seen
+ldap_candidates=(389 636 3268 3269)
+
+# First pass: detect hints and collect existing LDAP ports
+IFS=',' read -r -a raw_ports <<< "${ports_csv// /}"
+for p in "${raw_ports[@]}"; do
+  p_clean="${p//[^0-9]/}"
+  [ -z "$p_clean" ] && continue
+
+  case "$p_clean" in
+    88|135|445)
+      dc_hint=1
+      ;;
+  esac
+
+  case "$p_clean" in
+    389|636|3268|3269)
+      seen["$p_clean"]=1
+      ;;
+  esac
+done
+
+# If we see DC hints, force full set
+if [ "$dc_hint" -eq 1 ]; then
+  echo "389,636,3268,3269"
+  exit 0
+fi
+
+# Otherwise, emit only LDAP-ish ports we actually saw
+out=""
+for p in "${ldap_candidates[@]}"; do
+  if [ "${seen[$p]+x}" ]; then
+    [ -n "$out" ] && out+=","
+    out+="$p"
+  fi
+done
+
+# If still empty, fallback to 389
+[ -z "$out" ] && out="389"
+echo "$out"
+exit 0

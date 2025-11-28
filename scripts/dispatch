@@ -192,7 +192,8 @@ fi
 if [ "$has_ldap" = true ] && [ -x "$LDAP_MASTER" ]; then
   echo -e "${yellow}  [-]${end} ${purple}Starting LDAP module on port(s):${end} ${blue}${ldap_ports_str:-<default>}${end}"
   # ldap-master signature: ldap-master OUTDIR TARGET [PORTS]
-  "$LDAP_MASTER" "$OUTDIR" "$TARGET" "$ldap_ports_str" >"$LOGDIR/ldap.log" 2>&1 &
+  LDAP_PORTS="$("$ROOTDIR/modules/ldap/ldap-ports" "$PORTS")"
+  "$LDAP_MASTER" "$OUTDIR" "$TARGET" "$LDAP_PORTS" &
   ldap_pid=$!
 
   (

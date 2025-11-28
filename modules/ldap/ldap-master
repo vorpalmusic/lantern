@@ -17,6 +17,7 @@
 #           - Computers (hostnames, OS, SPNs)
 #           - SPN-bearing accounts
 #           - “Interesting” admin-ish accounts
+#           - Full objectClass=* (all LDAP-visible objects)
 #       * Artifacts under OUTDIR/ldap/<PORT>/:
 #           rootdse.txt
 #           basedn.txt
@@ -26,7 +27,11 @@
 #           computers.txt
 #           spn-accounts.txt
 #           interesting.txt
-#           summary.txt
+#           users-classified.txt        (HUMAN/SERVICE/SYSTEM + state + ASREP)
+#           groups-priv.txt             (high-priv group summary)
+#           all-objects.txt             (raw objectClass=* dump)
+#           extra-accounts.txt          (accounts only seen via objectClass=* search)
+#           summary.txt                 (human-friendly, high-signal view)
 #
 #   - Requires: ldapsearch (ldap-utils)
 
@@ -142,6 +147,12 @@ for PORT in "${ports[@]}"; do
   COMPUTERS_FILE="$LDAPDIR/computers.txt"
   SPN_FILE="$LDAPDIR/spn-accounts.txt"
   INTERESTING_FILE="$LDAPDIR/interesting.txt"
+  CLASS_FILE="$LDAPDIR/users-classified.txt"
+  PRIVGROUP_FILE="$LDAPDIR/groups-priv.txt"
+  ALLOBJ_FILE="$LDAPDIR/all-objects.txt"
+  EXTRA_ACCOUNTS_FILE="$LDAPDIR/extra-accounts.txt"
+  KNOWN_SAM_FILE="$LDAPDIR/known-sam.txt"
+  ALL_ACCOUNTS_RAW="$LDAPDIR/all-accounts-raw.txt"
   SUMMARY_FILE="$LDAPDIR/summary.txt"
 
   : >"$ROOTDSE_FILE"
@@ -152,6 +163,12 @@ for PORT in "${ports[@]}"; do
   : >"$COMPUTERS_FILE"
   : >"$SPN_FILE"
   : >"$INTERESTING_FILE"
+  : >"$CLASS_FILE"
+  : >"$PRIVGROUP_FILE"
+  : >"$ALLOBJ_FILE"
+  : >"$EXTRA_ACCOUNTS_FILE"
+  : >"$KNOWN_SAM_FILE"
+  : >"$ALL_ACCOUNTS_RAW"
   : >"$SUMMARY_FILE"
 
   port_label="$(ldap_port_label "$PORT")"
@@ -162,22 +179,19 @@ for PORT in "${ports[@]}"; do
 
   anon_ok=0
   base_dn=""
+  domain_name=""
+  dc_host=""
   users_count=0
   groups_count=0
   computers_count=0
   spn_count=0
   interesting_count=0
-
-  {
-    echo "==== LDAP Module Start ===="
-    echo "Target:      $TARGET"
-    echo "URL:         $url"
-    echo "Port label:  $port_label"
-    echo
-  } >>"$SUMMARY_FILE"
+  human_count=0
+  service_count=0
+  asrep_count=0
+  extra_accounts_count=0
 
   # --- RootDSE / anonymous bind test ---
-  # Note: nettimeout + time limit keep things from hanging forever.
 
   ldapsearch -x \
     -H "$url" \
@@ -195,19 +209,19 @@ for PORT in "${ports[@]}"; do
     echo -e "${yellow}    [!] Anonymous LDAP bind failed or returned no data on${end} ${blue}${TARGET}:${PORT}${end}"
   fi
 
-  {
-    echo "==== RootDSE / Capabilities ===="
-    if [ -s "$ROOTDSE_FILE" ]; then
-      cat "$ROOTDSE_FILE"
-    else
-      echo "<no RootDSE data; anonymous bind likely not allowed>"
-    fi
-    echo
-  } >>"$SUMMARY_FILE"
-
   # Extract base DN
   base_dn="$(extract_basedn "$ROOTDSE_FILE")"
   printf "%s\n" "${base_dn:-}" >"$BASEDN_FILE"
+
+  # Derive domain name from base DN (e.g. DC=htb,DC=local -> htb.local)
+  if [ -n "$base_dn" ]; then
+    domain_name="$(echo "$base_dn" | sed 's/DC=//g;s/,/./g')"
+  fi
+
+  # DC hostname from RootDSE if present
+  if [ -s "$ROOTDSE_FILE" ]; then
+    dc_host="$(grep -m1 '^dnsHostName:' "$ROOTDSE_FILE" 2>/dev/null | sed 's/^dnsHostName:[[:space:]]*//')"
+  fi
 
   if [ -n "$base_dn" ]; then
     echo -e "${yellow}    [*]${end} ${purple}Base DN detected:${end} ${blue}${base_dn}${end}"
@@ -215,17 +229,43 @@ for PORT in "${ports[@]}"; do
     echo -e "${yellow}    [!] No base DN derived from RootDSE; skipping deep LDAP searches on${end} ${blue}${TARGET}:${PORT}${end}"
   fi
 
-  # If no base_dn, just finalize summary for this port
+  # If no base_dn, we still write a minimal summary and move on
   if [ -z "$base_dn" ]; then
     {
-      echo "==== LDAP Port Summary ===="
-      echo "Target:      $TARGET"
-      echo "Port:        $PORT"
-      echo "Port label:  $port_label"
-      echo "Anon bind:   $anon_ok"
-      echo "Base DN:     <none>"
+      echo "BASE DN:               <none>"
+      echo "DOMAIN:                ${domain_name:-<unknown>}"
+      echo "DC Host:               ${dc_host:-<unknown>}"
+      echo -n "Anonymous Bind:        "
+      [ "$anon_ok" -eq 1 ] && echo "YES" || echo "NO"
       echo
-    } >>"$SUMMARY_FILE"
+      echo "Users:                 0"
+      echo "Groups:                0"
+      echo "Computers:             0"
+      echo "SPN Accounts:          0"
+      echo
+      echo "----------------------------"
+      echo "[ Human Users ]"
+      echo "  (no base DN; no user enumeration)"
+      echo
+      echo "[ Service Accounts ]"
+      echo "  (no base DN; no service enumeration)"
+      echo
+      echo "[ SPN Accounts ]"
+      echo "  (no base DN; no SPN enumeration)"
+      echo
+      echo "[ High-Privilege Groups ]"
+      echo "  (no base DN; no group enumeration)"
+      echo
+      echo "[ Interesting Users ]"
+      echo "  (no base DN; no heuristics)"
+      echo
+      echo "[ Additional Accounts (objectClass=* only) ]"
+      echo "  (no base DN; no objectClass=* enumeration)"
+      echo
+      echo "[ Service Smells ]"
+      echo "  Exchange:            unknown"
+      echo
+    } >"$SUMMARY_FILE"
     continue
   fi
 
@@ -240,16 +280,6 @@ for PORT in "${ports[@]}"; do
     "(objectClass=*)" \
     name distinguishedName objectClass \
     >"$DOMAIN_FILE" 2>/dev/null || true
-
-  {
-    echo "==== Domain Object (Base DN) ===="
-    if [ -s "$DOMAIN_FILE" ]; then
-      cat "$DOMAIN_FILE"
-    else
-      echo "<no domain object returned from base DN>"
-    fi
-    echo
-  } >>"$SUMMARY_FILE"
 
   # --- Users (non-computer) ---
   ldapsearch -x \
@@ -266,7 +296,8 @@ for PORT in "${ports[@]}"; do
     >"$USERS_FILE" 2>/dev/null || true
 
   if [ -s "$USERS_FILE" ]; then
-    users_count="$(grep -c '^dn: ' "$USERS_FILE" 2>/dev/null || echo 0)"
+    users_count="$(grep -c '^dn: ' "$USERS_FILE" 2>/dev/null || true)"
+    [ -z "$users_count" ] && users_count=0
   fi
 
   # --- Groups ---
@@ -283,7 +314,8 @@ for PORT in "${ports[@]}"; do
     >"$GROUPS_FILE" 2>/dev/null || true
 
   if [ -s "$GROUPS_FILE" ]; then
-    groups_count="$(grep -c '^dn: ' "$GROUPS_FILE" 2>/dev/null || echo 0)"
+    groups_count="$(grep -c '^dn: ' "$GROUPS_FILE" 2>/dev/null || true)"
+    [ -z "$groups_count" ] && groups_count=0
   fi
 
   # --- Computers ---
@@ -301,7 +333,8 @@ for PORT in "${ports[@]}"; do
     >"$COMPUTERS_FILE" 2>/dev/null || true
 
   if [ -s "$COMPUTERS_FILE" ]; then
-    computers_count="$(grep -c '^dn: ' "$COMPUTERS_FILE" 2>/dev/null || echo 0)"
+    computers_count="$(grep -c '^dn: ' "$COMPUTERS_FILE" 2>/dev/null || true)"
+    [ -z "$computers_count" ] && computers_count=0
   fi
 
   # --- SPN-bearing accounts (for later roasting) ---
@@ -318,11 +351,11 @@ for PORT in "${ports[@]}"; do
     >"$SPN_FILE" 2>/dev/null || true
 
   if [ -s "$SPN_FILE" ]; then
-    spn_count="$(grep -c '^dn: ' "$SPN_FILE" 2>/dev/null || echo 0)"
+    spn_count="$(grep -c '^dn: ' "$SPN_FILE" 2>/dev/null || true)"
+    [ -z "$spn_count" ] && spn_count=0
   fi
 
   # --- "Interesting" accounts (basic heuristics) ---
-  # Look for adminCount=1 or classic admin groups referenced (Domain Admins, Enterprise Admins, etc.)
   : >"$INTERESTING_FILE"
   if [ -s "$USERS_FILE" ]; then
     # adminCount=1
@@ -354,50 +387,417 @@ for PORT in "${ports[@]}"; do
       }
     ' "$INTERESTING_FILE" >"$INTERESTING_FILE.tmp" 2>/dev/null || true
     mv "$INTERESTING_FILE.tmp" "$INTERESTING_FILE" 2>/dev/null || true
-    interesting_count="$(grep -c '^dn: ' "$INTERESTING_FILE" 2>/dev/null || echo 0)"
+    interesting_count="$(grep -c '^dn: ' "$INTERESTING_FILE" 2>/dev/null || true)"
+    [ -z "$interesting_count" ] && interesting_count=0
   fi
 
-  # --- Append key sections to summary for quick view ---
+  # --- Classification helper: HUMAN / SERVICE / SYSTEM + enabled/disabled + ASREP flag ---
+
+  classify_sam() {
+    # args: sam, uac (may be empty)
+    local sam_local="$1"
+    local uac_local="$2"
+    local sam_l uacv system state asrep type
+
+    [ -z "$sam_local" ] && return 0
+
+    sam_l="${sam_local,,}"
+    uacv=0
+    if [[ "$uac_local" =~ ^[0-9]+$ ]]; then
+      uacv="$uac_local"
+    fi
+
+    # --- system / service / human classification ---
+    system=0
+    case "$sam_l" in
+      guest|defaultaccount)
+        system=1
+        ;;
+    esac
+    [[ "$sam_l" == sm_* ]] && system=1
+    [[ "$sam_l" == healthmailbox* ]] && system=1
+    [[ "$sam_l" == msol_* ]] && system=1
+    [[ "$sam_local" == *'$' ]] && system=1    # machine accounts ending with $
+
+    # enabled / disabled based on userAccountControl
+    state="unknown"
+    if (( uacv > 0 )); then
+      if (( uacv & 2 )); then
+        state="disabled"
+      else
+        state="enabled"
+      fi
+    fi
+
+    # AS-REP roastable? (DONT_REQ_PREAUTH 0x400000 = 4194304)
+    asrep="NO"
+    if (( uacv > 0 && (uacv & 4194304) != 0 )); then
+      asrep="ASREP_ROASTABLE"
+    fi
+
+    type="HUMAN"
+    if (( system )); then
+      type="SYSTEM"
+    else
+      # service patterns, including svc-* etc.
+      if [[ "$sam_l" == svc-*    || "$sam_l" == svc_*   || \
+            "$sam_l" == sql*     || "$sam_l" == backup* || \
+            "$sam_l" == app*     || "$sam_l" == service* || \
+            "$sam_local" == '$'* ]]; then
+        type="SERVICE"
+      fi
+    fi
+
+    printf '%s|%s|%s|%s\n' "$type" "$sam_local" "$state" "$asrep" >>"$CLASS_FILE"
+  }
+
+  # --- Classify users from USERS_FILE ---
+  human_count=0
+  service_count=0
+  asrep_count=0
+
+  if [ -s "$USERS_FILE" ]; then
+    : >"$CLASS_FILE"
+
+    sam=""
+    uac=""
+
+    # Parse users.txt line-by-line
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        dn:\ *)
+          # new record starts -> finalize previous
+          classify_sam "$sam" "$uac"
+          sam=""
+          uac=""
+          ;;
+        sAMAccountName:\ *)
+          sam="${line#sAMAccountName: }"
+          ;;
+        userAccountControl:\ *)
+          uac="${line#userAccountControl: }"
+          ;;
+      esac
+    done <"$USERS_FILE"
+
+    # finalize last record
+    classify_sam "$sam" "$uac"
+
+    if [ -s "$CLASS_FILE" ]; then
+      human_count="$(grep -c '^HUMAN|' "$CLASS_FILE" 2>/dev/null || true)"
+      service_count="$(grep -c '^SERVICE|' "$CLASS_FILE" 2>/dev/null || true)"
+      asrep_count="$(grep -c 'ASREP_ROASTABLE' "$CLASS_FILE" 2>/dev/null || true)"
+
+      [ -z "$human_count" ] && human_count=0
+      [ -z "$service_count" ] && service_count=0
+      [ -z "$asrep_count" ] && asrep_count=0
+    fi
+  fi
+
+  # --- Full objectClass=* enumeration (windapsearch-style) ---
+  ldapsearch -x \
+    -H "$url" \
+    -b "$base_dn" \
+    -s sub \
+    -LLL \
+    -o nettimeout=15 \
+    -l 90 \
+    -z 5000 \
+    "(objectClass=*)" \
+    dn sAMAccountName objectClass \
+    >"$ALLOBJ_FILE" 2>/dev/null || true
+
+  # Build known sAMAccountName set from CLASS_FILE
+  if [ -s "$CLASS_FILE" ]; then
+    cut -d'|' -f2 "$CLASS_FILE" | sed '/^$/d' | sort -u >"$KNOWN_SAM_FILE" 2>/dev/null || true
+  else
+    : >"$KNOWN_SAM_FILE"
+  fi
+
+  # Extract all accounts from all-objects (sam|objectClasses), with CN fallback
+  if [ -s "$ALLOBJ_FILE" ]; then
+    awk '
+      BEGIN { RS=""; FS="\n" }
+      {
+        sam=""; dn=""; ocs=""
+        for (i=1; i<=NF; i++) {
+          line=$i
+          if (line ~ /^dn:[[:space:]]*/) {
+            dn=line
+            sub(/^dn:[[:space:]]*/, "", dn)
+          } else if (line ~ /^sAMAccountName:[[:space:]]*/) {
+            sam=line
+            sub(/^sAMAccountName:[[:space:]]*/, "", sam)
+          } else if (line ~ /^objectClass:[[:space:]]*/) {
+            oc=line
+            sub(/^objectClass:[[:space:]]*/, "", oc)
+            if (ocs=="") { ocs=oc } else { ocs=ocs "," oc }
+          }
+        }
+        # If sAMAccountName is hidden, derive from CN= in the DN
+        if (sam == "" && dn != "") {
+          cn = dn
+          sub(/,.*/, "", cn)
+          sub(/^[Cc][Nn]=/, "", cn)
+          sam = cn
+        }
+        if (sam=="") next
+        print sam "|" ocs
+      }
+    ' "$ALLOBJ_FILE" >"$ALL_ACCOUNTS_RAW" 2>/dev/null || true
+  fi
+
+  # Derive extra accounts: present in objectClass=* dump, but not in CLASS_FILE
+  if [ -s "$ALL_ACCOUNTS_RAW" ]; then
+    while IFS='|' read -r sam_oc sam_ocs; do
+      sam_oc="${sam_oc:-}"
+      [ -z "$sam_oc" ] && continue
+      if ! grep -qxF "$sam_oc" "$KNOWN_SAM_FILE" 2>/dev/null; then
+        echo "$sam_oc|${sam_ocs:-}" >>"$EXTRA_ACCOUNTS_FILE"
+      fi
+    done <"$ALL_ACCOUNTS_RAW"
+  fi
+
+  # Classify extra accounts (svc-alfresco etc.)
+  # Only treat extras as accounts if:
+  #   - objectClass is clearly user-like, OR
+  #   - name is clearly svc-* (and objectClass is not a group/container/OU).
+  extra_accounts_count=0
+  if [ -s "$EXTRA_ACCOUNTS_FILE" ]; then
+    while IFS='|' read -r extra_sam extra_ocs; do
+      [ -z "$extra_sam" ] && continue
+
+      # Normalize for checks
+      ocs_l="$(printf '%s\n' "${extra_ocs:-}" | tr '[:upper:]' '[:lower:]')"
+      sam_l="${extra_sam,,}"
+
+      # Ignore obvious non-account object types (groups, OUs, containers)
+      case "$ocs_l" in
+        *group*|*organizationalunit*|*container*)
+          continue
+          ;;
+      esac
+
+      is_account=0
+
+      # 1) objectClass says "user-like"
+      case "$ocs_l" in
+        *user*|*person*|*inetorgperson*|*organizationalperson*|*msds-groupmanagedserviceaccount*)
+          is_account=1
+          ;;
+      esac
+
+      # 2) Very conservative svc-* heuristic; samAccountName never has spaces,
+      #    but we already filtered out group/OU/container objectClasses above.
+      if [ "$is_account" -eq 0 ]; then
+        if [[ "$sam_l" == svc-* || "$sam_l" == svc_* ]]; then
+          is_account=1
+        fi
+      fi
+
+      [ "$is_account" -eq 0 ] && continue
+
+      # No userAccountControl here (we don't have it in the all-objects pass),
+      # so state will be "unknown" in classify_sam.
+      classify_sam "$extra_sam" ""
+      extra_accounts_count=$((extra_accounts_count + 1))
+    done <"$EXTRA_ACCOUNTS_FILE"
+  fi
+
+  # Recompute HUMAN/SERVICE/ASREP counters now that extras have been added
+  if [ -s "$CLASS_FILE" ]; then
+    human_count="$(grep -c '^HUMAN|' "$CLASS_FILE" 2>/dev/null || true)"
+    service_count="$(grep -c '^SERVICE|' "$CLASS_FILE" 2>/dev/null || true)"
+    asrep_count="$(grep -c 'ASREP_ROASTABLE' "$CLASS_FILE" 2>/dev/null || true)"
+    [ -z "$human_count" ] && human_count=0
+    [ -z "$service_count" ] && service_count=0
+    [ -z "$asrep_count" ] && asrep_count=0
+  fi
+
+  # --- High-privilege group summary ---
+  if [ -s "$GROUPS_FILE" ]; then
+    awk '
+      BEGIN { RS=""; FS="\n" }
+      {
+        sam=""; name=""; members=0
+        for (i=1; i<=NF; i++) {
+          line=$i
+          if (line ~ /^sAMAccountName:[[:space:]]*/) { sam=line; sub(/^sAMAccountName:[[:space:]]*/, "", sam) }
+          else if (line ~ /^name:[[:space:]]*/)      { name=line; sub(/^name:[[:space:]]*/, "", name) }
+          else if (line ~ /^member:[[:space:]]*/)    { members++ }
+        }
+        if (sam=="" && name=="") next
+        lname = tolower(name)
+        lsam  = tolower(sam)
+        gname = name
+        if (gname=="") gname=sam
+
+        grp=""
+        if (lname ~ /domain admins/      || lsam ~ /domain admins/)      grp="Domain Admins"
+        else if (lname ~ /enterprise admins/  || lsam ~ /enterprise admins/)  grp="Enterprise Admins"
+        else if (lname ~ /^administrators$/   || lsam ~ /^administrators$/)   grp="Administrators"
+        else if (lname ~ /backup operators/   || lsam ~ /backup operators/)   grp="Backup Operators"
+        else if (lname ~ /account operators/  || lsam ~ /account operators/)  grp="Account Operators"
+
+        if (grp != "") {
+          printf "%s|%s|%d\n", grp, gname, members
+        }
+      }
+    ' "$GROUPS_FILE" >"$PRIVGROUP_FILE" 2>/dev/null || true
+  fi
+
+  # --- Service smells (currently: Exchange only) ---
+  exchange_smell="NO"
+  if [ -s "$USERS_FILE" ]; then
+    if grep -qi 'HealthMailbox\|SystemMailbox\|Microsoft Exchange' "$USERS_FILE" 2>/dev/null; then
+      exchange_smell="YES"
+    fi
+  fi
+
+  # --- Normalize counters to digits only for extra safety ---
+  users_count="${users_count//[^0-9]/}"
+  groups_count="${groups_count//[^0-9]/}"
+  computers_count="${computers_count//[^0-9]/}"
+  spn_count="${spn_count//[^0-9]/}"
+  human_count="${human_count//[^0-9]/}"
+  service_count="${service_count//[^0-9]/}"
+  asrep_count="${asrep_count//[^0-9]/}"
+  interesting_count="${interesting_count//[^0-9]/}"
+  extra_accounts_count="${extra_accounts_count//[^0-9]/}"
+
+  [ -z "$users_count" ] && users_count=0
+  [ -z "$groups_count" ] && groups_count=0
+  [ -z "$computers_count" ] && computers_count=0
+  [ -z "$spn_count" ] && spn_count=0
+  [ -z "$human_count" ] && human_count=0
+  [ -z "$service_count" ] && service_count=0
+  [ -z "$asrep_count" ] && asrep_count=0
+  [ -z "$interesting_count" ] && interesting_count=0
+  [ -z "$extra_accounts_count" ] && extra_accounts_count=0
+
+  # --- Build human-friendly summary.txt ---
+
   {
-    echo "==== Users (summary) ===="
-    echo "Total user objects (non-computer): $users_count"
+    echo "BASE DN:               ${base_dn:-<none>}"
+    echo "DOMAIN:                ${domain_name:-<unknown>}"
+    echo "DC Host:               ${dc_host:-<unknown>}"
+    echo -n "Anonymous Bind:        "
+    [ "$anon_ok" -eq 1 ] && echo "YES" || echo "NO"
     echo
-    echo "==== Groups (summary) ===="
-    echo "Total group objects:              $groups_count"
+
+    if [ -s "$CLASS_FILE" ] && [ "$users_count" -gt 0 ]; then
+      echo "Users:                 ${users_count} (human: ${human_count}, service: ${service_count})"
+    else
+      echo "Users:                 ${users_count}"
+    fi
+    echo "Groups:                ${groups_count}"
+    echo "Computers:             ${computers_count}"
+    echo "SPN Accounts:          ${spn_count}"
+    echo "Extra accounts (objectClass=* only): ${extra_accounts_count}"
     echo
-    echo "==== Computers (summary) ===="
-    echo "Total computer objects:           $computers_count"
-    echo
-    echo "==== SPN-bearing accounts (summary) ===="
-    echo "Total accounts with SPNs:         $spn_count"
-    echo
-    echo "==== Interesting accounts (summary) ===="
-    echo "Heuristic matches (adminCount=1 or admin groups): $interesting_count"
-    echo
+    echo "----------------------------"
+    echo "[ Human Users ]"
+  } >"$SUMMARY_FILE"
+
+  if [ -s "$CLASS_FILE" ] && [ "$human_count" -gt 0 ]; then
+    awk -F'|' '$1=="HUMAN"{ printf "  %-22s %s\n", $2, $3 }' "$CLASS_FILE" >>"$SUMMARY_FILE"
+  else
+    echo "  (none detected)" >>"$SUMMARY_FILE"
+  fi
+  echo >>"$SUMMARY_FILE"
+
+  {
+    echo "[ Service Accounts ]"
+  } >>"$SUMMARY_FILE"
+  if [ -s "$CLASS_FILE" ] && [ "$service_count" -gt 0 ]; then
+    awk -F'|' '$1=="SERVICE"{ printf "  %-22s %s\n", $2, $3 }' "$CLASS_FILE" >>"$SUMMARY_FILE"
+  else
+    echo "  (none detected)" >>"$SUMMARY_FILE"
+  fi
+  echo >>"$SUMMARY_FILE"
+
+  {
+    echo "[ SPN Accounts ]"
+  } >>"$SUMMARY_FILE"
+  if [ -s "$SPN_FILE" ] && [ "$spn_count" -gt 0 ]; then
+    awk '
+      BEGIN { RS=""; FS="\n" }
+      {
+        sam=""; spn_first=""
+        for (i=1; i<=NF; i++) {
+          line=$i
+          if (line ~ /^sAMAccountName:[[:space:]]*/) {
+            sam=line; sub(/^sAMAccountName:[[:space:]]*/, "", sam)
+          } else if (line ~ /^servicePrincipalName:[[:space:]]*/ && spn_first=="") {
+            spn_first=line; sub(/^servicePrincipalName:[[:space:]]*/, "", spn_first)
+          }
+        }
+        if (sam != "") {
+          if (spn_first == "") spn_first="-"
+          printf "  %-22s %s\n", sam, spn_first
+        }
+      }
+    ' "$SPN_FILE" >>"$SUMMARY_FILE"
+  else
+    echo "  (none detected)" >>"$SUMMARY_FILE"
+  fi
+  echo >>"$SUMMARY_FILE"
+
+  {
+    echo "[ High-Privilege Groups ]"
+  } >>"$SUMMARY_FILE"
+  if [ -s "$PRIVGROUP_FILE" ]; then
+    while IFS='|' read -r grp gname members; do
+      [ -z "$grp" ] && continue
+      printf "  %-22s members: %s\n" "$grp" "${members:-0}" >>"$SUMMARY_FILE"
+    done <"$PRIVGROUP_FILE"
+  else
+    echo "  (none detected)" >>"$SUMMARY_FILE"
+  fi
+  echo >>"$SUMMARY_FILE"
+
+  {
+    echo "[ Interesting Users ]"
   } >>"$SUMMARY_FILE"
 
-  # --- Port summary footer ---
+  if [ -s "$INTERESTING_FILE" ] && [ "$interesting_count" -gt 0 ]; then
+    echo "  adminCount / admin-group heuristics:" >>"$SUMMARY_FILE"
+    echo "    ${interesting_count} entries — see: $INTERESTING_FILE" >>"$SUMMARY_FILE"
+  elif [ "$asrep_count" -gt 0 ]; then
+    :
+  else
+    echo "  (none detected)" >>"$SUMMARY_FILE"
+  fi
+
+  if [ -s "$CLASS_FILE" ] && [ "$asrep_count" -gt 0 ]; then
+    echo >>"$SUMMARY_FILE"
+    echo "  AS-REP roastable candidates:" >>"$SUMMARY_FILE"
+    awk -F'|' '$4=="ASREP_ROASTABLE"{ printf "    %-20s (%s)\n", $2, $3 }' "$CLASS_FILE" >>"$SUMMARY_FILE"
+  fi
+  echo >>"$SUMMARY_FILE"
+
   {
-    echo "==== LDAP Port Summary ===="
-    echo "Target:       $TARGET"
-    echo "Port:         $PORT"
-    echo "Port label:   $port_label"
-    echo "Anon bind:    $anon_ok"
-    echo "Base DN:      ${base_dn:-<none>}"
-    echo "Users:        $users_count"
-    echo "Groups:       $groups_count"
-    echo "Computers:    $computers_count"
-    echo "SPN accounts: $spn_count"
-    echo "Interesting:  $interesting_count"
-    echo "Files:"
-    echo "  RootDSE:        $ROOTDSE_FILE"
-    echo "  Base DN:        $BASEDN_FILE"
-    echo "  Domain object:  $DOMAIN_FILE"
-    echo "  Users:          $USERS_FILE"
-    echo "  Groups:         $GROUPS_FILE"
-    echo "  Computers:      $COMPUTERS_FILE"
-    echo "  SPN accounts:   $SPN_FILE"
-    echo "  Interesting:    $INTERESTING_FILE"
+    echo "[ Additional Accounts (objectClass=* only) ]"
+  } >>"$SUMMARY_FILE"
+  printed_extra=0
+  if [ -s "$EXTRA_ACCOUNTS_FILE" ] && [ -s "$CLASS_FILE" ]; then
+    while IFS='|' read -r extra_sam extra_ocs; do
+      [ -z "$extra_sam" ] && continue
+      typ="$(grep -m1 "|${extra_sam}|" "$CLASS_FILE" 2>/dev/null | cut -d'|' -f1)"
+      # Only show extras we actually classified (HUMAN/SERVICE/SYSTEM).
+      [ -z "$typ" ] && continue
+      printf "  %-22s %s\n" "$extra_sam" "$typ" >>"$SUMMARY_FILE"
+      printed_extra=1
+    done <"$EXTRA_ACCOUNTS_FILE"
+  fi
+  if [ "$printed_extra" -eq 0 ]; then
+    echo "  (none detected)" >>"$SUMMARY_FILE"
+  fi
+  echo >>"$SUMMARY_FILE"
+
+  {
+    echo "[ Service Smells ]"
+    echo "  Exchange:            ${exchange_smell}"
     echo
   } >>"$SUMMARY_FILE"
 
