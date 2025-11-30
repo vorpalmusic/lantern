@@ -29,10 +29,10 @@ lantern <IP>
 
   - Clean, quiet execution with colored terminal output (if added to your .zshrc or bash script).
 
-## 📌 Why use iRecon?
+## 📌 Why use lantern?
 
-While iRecon runs in the background automating tedious steps, you can focus on exploring services, web apps, or other vectors in parallel. This workflow dramatically reduces downtime and boosts productivity during reconnaissance.
-No more wasting time typing repetitive Nmap commands or organizing reports manually — iRecon takes care of it all, and your port 6969 stays clean and free afterward 😉
+While lantern runs in the background automating tedious steps, you can focus on exploring services, web apps, or other vectors in parallel. This workflow dramatically reduces downtime and boosts productivity during reconnaissance.
+No more wasting time typing repetitive Nmap commands or organizing reports manually — lantern takes care of it all. 😉
 
 ## 🛠️ Perfect For
 
