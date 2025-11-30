@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# treasure-reporter — build the "Treasure" section HTML fragment
+# Usage:
+#   treasure-reporter OUTDIR
+#
+# Expects:
+#   LDAP + Kerberos treasure artifacts, e.g.:
+#     OUTDIR/ldap/<PORT>/treasure/svc_hidden.txt
+#     OUTDIR/kerb/treasure/asrep-summary.txt
+#     OUTDIR/kerb/treasure/asrep-hashes.txt
+#
+# Emits:
+#   HTML fragment to stdout (or nothing if there is no treasure)
+
+OUTDIR="${1:-}"
+[ -n "$OUTDIR" ] || exit 0
+[ -d "$OUTDIR" ] || exit 0
+
+LDAPDIR="$OUTDIR/ldap"
+KERB_TREASURE="$OUTDIR/kerb/treasure"
+
+ASREP_SUMMARY="$KERB_TREASURE/asrep-summary.txt"
+ASREP_HASHES="$KERB_TREASURE/asrep-hashes.txt"
+
+# --- helpers ---
+
+html_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+have_any=false
+
+# 1) Hidden service accounts (svc-* only visible via objectClass=*), merged across ports
+svc_hidden_tmp="$(mktemp)"
+if [ -d "$LDAPDIR" ]; then
+  while IFS= read -r f; do
+    [ -s "$f" ] || continue
+    awk 'NF > 0' "$f" >> "$svc_hidden_tmp"
+  done < <(find "$LDAPDIR" -type f -path "*/treasure/svc_hidden.txt" 2>/dev/null || true)
+fi
+
+if [ -s "$svc_hidden_tmp" ]; then
+  have_any=true
+fi
+
+# 2) Kerberos AS-REP roasting artifacts: presence of kerb/treasure is enough to show the section
+if [ -d "$KERB_TREASURE" ]; then
+  have_any=true
+fi
+
+# If nothing interesting at all, emit nothing
+if [ "$have_any" = false ]; then
+  rm -f "$svc_hidden_tmp"
+  exit 0
+fi
+
+##############################################
+# Emit HTML fragment
+##############################################
+
+cat <<EOF
+<hr />
+<h2 id="treasure">Treasure</h2>
+
+<div class="section">
+  <p>High-value findings and immediately reusable loot collected from all modules and post-processing.</p>
+EOF
+
+# --- Hidden svc-* accounts ---
+if [ -s "$svc_hidden_tmp" ]; then
+  echo "  <h3>Hidden Service Accounts (LDAP)</h3>"
+  echo "  <p>Service-style accounts only visible in full <code>objectClass=*</code> enumeration (prime targets for Kerberos probing, password attacks, or abuse of delegated rights):</p>"
+  echo "  <ul>"
+  sort -u "$svc_hidden_tmp" | while IFS= read -r acct; do
+    [ -n "$acct" ] || continue
+    esc_acct="$(printf '%s' "$acct" | html_escape)"
+    echo "    <li><code>$esc_acct</code></li>"
+  done
+  echo "  </ul>"
+fi
+
+# --- Kerberos / AS-REP roasting ---
+if [ -d "$KERB_TREASURE" ]; then
+  echo "  <h3>Kerberos – AS-REP Roasting</h3>"
+
+  # 2a) Show hashes VERY prominently, full content, ready to copy
+  if [ -f "$ASREP_HASHES" ]; then
+    if [ -s "$ASREP_HASHES" ]; then
+      echo "  <p>Captured AS-REP hashes (ready for offline cracking, e.g. with <code>hashcat -m 18200</code>):</p>"
+      echo "  <pre>"
+      html_escape < "$ASREP_HASHES"
+      echo "  </pre>"
+    else
+      echo "  <p><em>asrep-hashes.txt exists under <code>kerb/treasure</code> but is empty.</em></p>"
+    fi
+  else
+    echo "  <p><em>No <code>asrep-hashes.txt</code> present under <code>kerb/treasure</code> for this target.</em></p>"
+  fi
+
+  # 2b) Optional textual summary from kerb-post, if present
+  if [ -f "$ASREP_SUMMARY" ] && [ -s "$ASREP_SUMMARY" ]; then
+    echo "  <p>AS-REP roast summary:</p>"
+    echo "  <pre>"
+    html_escape < "$ASREP_SUMMARY"
+    echo "  </pre>"
+  fi
+fi
+
+echo "</div>"
+
+rm -f "$svc_hidden_tmp"
+exit 0

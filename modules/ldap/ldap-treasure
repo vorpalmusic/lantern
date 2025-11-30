@@ -222,6 +222,35 @@ write "$c" "$TREASURE_DIR/creds.txt"
 write "$r" "$TREASURE_DIR/urls.txt"
 write "$t" "$TREASURE_DIR/svc_hidden.txt"
 
+##############################################
+### HINTS (structured indicators for post-modules)
+##############################################
+
+HINTS="$TREASURE_DIR/hints.txt"
+touch "$HINTS"
+
+# 1) Hidden accounts -> AS-REP roasting candidates
+if [ -s "$TREASURE_DIR/svc_hidden.txt" ]; then
+  while read -r sam; do
+    echo "ldap:ASREP_CANDIDATE:$sam:Hidden service-style account (likely pre-auth disabled)" >> "$HINTS"
+  done < "$TREASURE_DIR/svc_hidden.txt"
+fi
+
+# 2) SPNs -> Kerberoast candidates
+if [ -s "$SPN_FILE" ]; then
+  awk -F': *' '/^servicePrincipalName:/ {print $2}' "$SPN_FILE" \
+    | while read -r spn; do
+        echo "ldap:KERB_SPN:$spn:Account exposes SPN (Kerberoast)" >> "$HINTS"
+      done
+fi
+
+# 3) High privilege groups -> Priv escalation targets
+if [ -s "$GROUPS_FILE" ]; then
+  if grep -E 'CN=Domain Admins|CN=Enterprise Admins|CN=Schema Admins' "$GROUPS_FILE" >/dev/null 2>&1; then
+    echo "ldap:HIGH_PRIV:DOMAIN_ADMINS:High privilege group membership present" >> "$HINTS"
+  fi
+fi
+
 rm -f "$u" "$e" "$s" "$g" "$m" "$d" "$n" "$h" "$c" "$r" "$t"
 
 if [ -s "$TREASURE_DIR/svc_hidden.txt" ]; then

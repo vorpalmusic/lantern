@@ -50,6 +50,7 @@ CORE_CMDS=(
   lsof
   fuser
   lftp
+  python3-impacket
 )
 
 OPTIONAL_CMDS=(

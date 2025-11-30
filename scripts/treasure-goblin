@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# treasure-goblin — consume module hints and prepare post-exploitation targets
+# Usage:
+#   treasure-goblin OUTDIR
+#
+# Behavior (phase 1):
+#   - Walk OUTDIR looking for */treasure/hints.txt
+#   - Parse lines: MODULE:TYPE:VALUE:REASON
+#   - For now:
+#       * Collect ldap:ASREP_CANDIDATE:<user>:<reason>
+#         into OUTDIR/kerb/treasure/asrep-candidates.txt
+#   - Later:
+#       * Fan out to post-modules (kerb-post, smb-post, etc.)
+#       * Aggregate results for treasure-post / reporter
+
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
+
+OUTDIR="${1:-}"
+
+if [ -z "$OUTDIR" ] || [ ! -d "$OUTDIR" ]; then
+  echo "[!] treasure-goblin: Usage: treasure-goblin OUTDIR" >&2
+  exit 2
+fi
+
+echo -e "${cyan}[*] [treasure-goblin]: rummaging for high-value hints in${end} ${blue}$OUTDIR${end}"
+
+# Where we'll stage Kerberos-related post targets (phase 1 focus)
+KERB_DIR="$OUTDIR/kerb"
+KERB_TREASURE="$KERB_DIR/treasure"
+mkdir -p "$KERB_TREASURE"
+
+ASREP_FILE="$KERB_TREASURE/asrep-candidates.txt"
+: > "$ASREP_FILE"   # truncate if exists
+
+# Find all hints.txt files produced by modules
+mapfile -t HINT_FILES < <(find "$OUTDIR" -type f -path "*/treasure/hints.txt" 2>/dev/null | sort)
+
+if [ "${#HINT_FILES[@]}" -eq 0 ]; then
+  echo -e "${yellow}    [*] [treasure-goblin]: no hints.txt files found under${end} ${blue}$OUTDIR${end}"
+  exit 0
+fi
+
+asrep_count=0
+
+for hf in "${HINT_FILES[@]}"; do
+  while IFS= read -r line; do
+    # Skip blank/comment lines defensively
+    [ -n "$line" ] || continue
+    case "$line" in
+      \#* ) continue ;;
+    esac
+
+    # Expect: MODULE:TYPE:VALUE:REASON (but REASON may contain colons)
+    MODULE="${line%%:*}"
+    rest="${line#*:}"
+    TYPE="${rest%%:*}"
+    rest2="${rest#*:}"
+    VALUE="${rest2%%:*}"
+    REASON="${rest2#*:}"
+
+    case "$MODULE:$TYPE" in
+      ldap:ASREP_CANDIDATE)
+        # VALUE is the username (sAMAccountName)
+        if [ -n "$VALUE" ]; then
+          echo "$VALUE" >> "$ASREP_FILE"
+          asrep_count=$((asrep_count + 1))
+        fi
+        ;;
+      *)
+        # Other hint types will be wired up in later phases
+        :
+        ;;
+    esac
+
+  done < "$hf"
+done
+
+# Deduplicate AS-REP candidates and report
+if [ -s "$ASREP_FILE" ]; then
+  sort -u "$ASREP_FILE" -o "$ASREP_FILE"
+  uniq_count=$(wc -l < "$ASREP_FILE" | tr -d '[:space:]')
+  echo -e "${yellow}    [*] [treasure-goblin]: identified${end} ${red}$uniq_count${end} ${yellow}AS-REP roast candidates in${end} ${blue}$ASREP_FILE${end}"
+else
+  rm -f "$ASREP_FILE"
+  echo -e "${cyan}    [*] [treasure-goblin]: no AS-REP candidates found yet${end}"
+fi
+
+exit 0

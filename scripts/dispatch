@@ -21,7 +21,10 @@ HTTP_CMS_MASTER="$ROOTDIR/modules/http/http-cms"
 FTP_MASTER="$ROOTDIR/modules/ftp/ftp-master"
 DNS_MASTER="$ROOTDIR/modules/dns/dns-master"
 LDAP_MASTER="$ROOTDIR/modules/ldap/ldap-master"
+
 TREASURE="$ROOTDIR/scripts/treasure"
+TREASURE_GOBLIN="$ROOTDIR/scripts/treasure-goblin"
+TREASURE_DISPATCH="$ROOTDIR/scripts/treasure-dispatch"
 
 has_ssh=false
 has_http=false
@@ -295,8 +298,14 @@ fi
 
 # --- Run Treasure aggregation (after all module blocks are printed) ---
 if [ -x "$TREASURE" ]; then
-  echo -e "\n${yellow}[*]${end} ${purple}Treasure Goblin deployed...${end}"
+  echo -e "\n${yellow}[*]${end} ${purple}Assembling raw treasure from all modules...${end}"
   "$TREASURE" "$OUTDIR"
+fi
+
+# --- Run treasure-dispatch to handle hints + post-modules ---
+if [ -x "$TREASURE_DISPATCH" ]; then
+  echo -e "\n${yellow}[*]${end} ${purple}Dispatching treasure post-processing...${end}"
+  "$TREASURE_DISPATCH" "$OUTDIR" "$TARGET"
 fi
 
 exit 0

@@ -2,9 +2,8 @@
 ## reporter
 
 ### GRAB ROOTDIR AND PATH VARS
-rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." >/dev/null 2>&1 && pwd)"
+rootdir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/.. >/dev/null 2>&1 && pwd)"
 . "$rootdir/lib/colors"
-
 
 OUTDIR="${1:-}"
 if [ -z "$OUTDIR" ] || [ ! -d "$OUTDIR" ]; then
@@ -21,6 +20,8 @@ fi
 
 FRAGDIR="$OUTDIR/report/fragments"
 mkdir -p "$FRAGDIR"
+
+TREASURE_REPORTER="$rootdir/scripts/treasure-reporter"
 
 # ---------------- helpers ----------------
 insert_before_body_close() {
@@ -225,7 +226,7 @@ build_ftp_fragment() {
       echo "<div class=\"lantern-port\">"
       echo "  <h4>Port <code>$port</code> — FTP</h4>"
       echo "  <div class=\"lantern-meta\">"
-      echo "    <strong>Anonymous login:</strong> $(html_escape <<< \"$login_ok\")"
+      echo "    <strong>Anonymous login:</strong> $(html_escape <<< "$login_ok")"
       echo "    &nbsp;•&nbsp; <strong>Permissions:</strong> $esc_perms"
       echo "    &nbsp;•&nbsp; <strong>Dirs:</strong> $dircount"
       echo "    &nbsp;•&nbsp; <strong>Files:</strong> $filecount"
@@ -549,6 +550,13 @@ fi
 
 build_http_fragment
 build_cms_fragment
+
+# Treasure fragment via treasure-reporter
+if [ -x "$TREASURE_REPORTER" ]; then
+  treasure_frag="$FRAGDIR/30-treasure.html"
+  "$TREASURE_REPORTER" "$OUTDIR" > "$treasure_frag" 2>/dev/null || true
+  [ -s "$treasure_frag" ] || rm -f "$treasure_frag"
+fi
 
 if compgen -G "$FRAGDIR"/* >/dev/null; then
   for f in $(ls -1v "$FRAGDIR"/*); do

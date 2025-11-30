@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# treasure-dispatch — orchestrate post-processing from treasure hints
+# Usage:
+#   treasure-dispatch OUTDIR TARGET
+#
+# Responsibilities:
+#   1) Run treasure-goblin to consume hints and build per-module candidate files.
+#   2) Call per-module *-post helpers (kerb-post, etc.) if they have work to do.
+#
+# This keeps scripts/dispatch focused on service modules and leaves all
+# post-exploitation wiring here.
+
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/.. >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
+  echo "[!] treasure-dispatch: Usage: treasure-dispatch OUTDIR TARGET" >&2
+  exit 2
+fi
+
+TREASURE_GOBLIN="$ROOTDIR/scripts/treasure-goblin"
+KERB_POST="$ROOTDIR/modules/kerb/kerb-post"
+
+echo -e "\n${yellow}[*]${end} ${purple}Treasure post-processing dispatcher starting...${end}"
+
+##############################################
+# 1) Run treasure-goblin (if present)
+##############################################
+if [ -x "$TREASURE_GOBLIN" ]; then
+  echo -e "${yellow}  [-]${end} ${purple}Treasure-goblin rummaging through hints...${end}"
+  "$TREASURE_GOBLIN" "$OUTDIR"
+else
+  echo -e "${cyan}  [*] treasure-goblin not found at${end} ${blue}$TREASURE_GOBLIN${end}"
+fi
+
+##############################################
+# 2) Kerberos post-processing (AS-REP roast)
+##############################################
+if [ -x "$KERB_POST" ]; then
+  have_kerb_hints=false
+
+  # Look for any treasure hints tagged as AS-REP candidates
+  # e.g. "ldap:ASREP_CANDIDATE:svc-alfresco:..."
+  if [ -d "$OUTDIR" ]; then
+    while IFS= read -r hints_file; do
+      # Skip empty files quickly
+      [ -s "$hints_file" ] || continue
+      if grep -q 'ASREP_CANDIDATE' "$hints_file"; then
+        have_kerb_hints=true
+        break
+      fi
+    done < <(find "$OUTDIR" -type f -name 'hints.txt' 2>/dev/null || true)
+  fi
+
+  if [ "$have_kerb_hints" = true ]; then
+    echo -e "${yellow}  [-]${end} ${purple}Kerberos post-processing (AS-REP roast) triggered by treasure hints for${end} ${blue}$TARGET${end}"
+    "$KERB_POST" "$OUTDIR" "$TARGET"
+  else
+    echo -e "${cyan}  [*] No Kerberos-relevant hints found (no ASREP_CANDIDATE entries). Skipping kerb-post.${end}"
+  fi
+else
+  echo -e "${cyan}  [*] kerb-post not found at${end} ${blue}$KERB_POST${end}"
+fi
+
+# Later:
+#   - Add SMB/HTTP/SQL post modules here, driven by their own hint tags:
+#       e.g. SMB_NTLM_HASH, HTTP_SES_COOKIE, SQL_CRED, etc.
+
+exit 0

