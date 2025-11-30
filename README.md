@@ -8,20 +8,11 @@ Find the original iRecon repo here--this little script inspired the current work
 the README will be totally reworked to reflect the current project soon.
 
 ## Installation
-Prerequisites
-```bash
-sudo apt install nmap xsltproc python3 wget bat firefox-esr lolcat xclip -y
-```
-Installing the tool
-```bash
-wget https://raw.githubusercontent.com/Gzzcoo/iRecon/refs/heads/main/iRecon
-chmod +x iRecon
-sudo mv iRecon /usr/local/bin/iRecon
-```
+TBD
 
 ## Usage
 ```bash
-iRecon <IP>
+lantern <IP>
 ```
 
 ## 🚀 Features
