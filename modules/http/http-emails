@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# http-emails — aggregate, de-dup, filter, and derive usernames from HTTP emails
+# Usage:
+#   http-emails OUTDIR TARGET --ports "80,8080" --deny-domains /path/to/deny-domains
+#
+# Produces:
+#   OUTDIR/http/emails.txt          — unique, deny-domains-filtered emails
+#   OUTDIR/http/usernames-http.txt  — candidate usernames derived from emails
+# Prints:
+#   Colored summary of emails + usernames (to stdout)
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ]; then
+  echo "[!] http-emails: Usage: http-emails OUTDIR TARGET --ports \"80,8080\" --deny-domains FILE" >&2
+  exit 2
+fi
+
+shift 2 || true
+
+PORTS=""
+DENY_DOMAINS=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ports)
+      PORTS="${2:-}"
+      shift 2
+      ;;
+    --deny-domains)
+      DENY_DOMAINS="${2:-}"
+      shift 2
+      ;;
+    *)
+      # ignore unknown flags for now
+      shift
+      ;;
+  esac
+done
+
+# Resolve ROOTDIR from modules/http/http-emails
+HMOD="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
+ROOTDIR="$(cd "$HMOD/../.." >/dev/null 2>&1 && pwd)"
+
+# Colors
+. "$ROOTDIR/lib/colors"
+
+emails_tmp="$OUTDIR/.emails.tmp"
+emails_sorted="$OUTDIR/.emails.sorted.tmp"
+filtered_tmp="$OUTDIR/.emails.filtered.tmp"
+usernames_tmp="$OUTDIR/.usernames.http.tmp"
+
+: > "$emails_tmp"
+: > "$emails_sorted"
+: > "$filtered_tmp"
+: > "$usernames_tmp"
+
+# --- 0) Helper: normalize deny-domains on the fly ---
+normalize_and_match_domain() {
+  local domain_lc deny_file="$DENY_DOMAINS"
+
+  domain_lc="$1"
+
+  # If deny-domains not set or file missing/empty, no match
+  if [ -z "$deny_file" ] || [ ! -f "$deny_file" ]; then
+    return 1
+  fi
+
+  # Normalize deny-domains on the fly and compare to domain_lc
+  sed 's/[#;].*$//' "$deny_file" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+    | sed '/^$/d' \
+    | grep -Fxq "$domain_lc"
+}
+
+# --- 1) Aggregate per-port emails ---
+if [ -n "$PORTS" ]; then
+  for p in $(echo "$PORTS" | tr ',' ' '); do
+    p="${p//[^0-9]/}"
+    [ -z "$p" ] && continue
+    f="$OUTDIR/http/$p/emails.txt"
+    [ -s "$f" ] && cat "$f" >> "$emails_tmp"
+  done
+fi
+
+if [ ! -s "$emails_tmp" ]; then
+  echo -e "${yellow}  [!] No emails found in the pages.${end}"
+  rm -f "$emails_tmp" "$emails_sorted" "$filtered_tmp" "$usernames_tmp"
+  exit 0
+fi
+
+# --- 2) Global de-dup across ports ---
+sort -u "$emails_tmp" > "$emails_sorted"
+
+# --- 3) Apply deny-domains based ONLY on the part after '@' ---
+while IFS= read -r e; do
+  case "$e" in
+    *@*)
+      # Extract the part after @
+      domain="${e##*@}"
+
+      # Normalize domain:
+      #  - lowercase
+      #  - strip any junk before the first [a-z0-9.-]
+      #  - strip anything after the last [a-z0-9.-]
+      domain_lc="$(printf '%s\n' "$domain" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/^[^a-z0-9.-]*//;s/[^a-z0-9.-].*$//')"
+
+      # If the normalized domain is in deny-domains, skip this email
+      if normalize_and_match_domain "$domain_lc"; then
+        continue
+      fi
+
+      echo "$e" >> "$filtered_tmp"
+      ;;
+    *)
+      # skip malformed lines
+      ;;
+  esac
+done < "$emails_sorted"
+
+if [ ! -s "$filtered_tmp" ]; then
+  echo -e "${yellow}  [!] All discovered email domains are denied by deny-domains.${end}"
+  rm -f "$emails_tmp" "$emails_sorted" "$filtered_tmp" "$usernames_tmp"
+  exit 0
+fi
+
+# --- 4) Final email artifact ---
+mkdir -p "$OUTDIR/http" 2>/dev/null || true
+emails_final="$OUTDIR/http/emails.txt"
+sort -u "$filtered_tmp" > "$emails_final"
+
+echo -e "${yellow}[*]${end} ${purple}Emails found in page content (after deny-domains):${end}"
+while IFS= read -r e; do
+  echo -e "   ${blue}${e}${end}"
+done < "$emails_final"
+
+# --- 5) Derive usernames from localparts (ONLY from filtered emails) ---
+while IFS= read -r e; do
+  lp="${e%@*}"
+  lp="${lp,,}"
+  [ -z "$lp" ] && continue
+
+  # Always include the raw localpart
+  echo "$lp" >> "$usernames_tmp"
+
+  # Simple split heuristics for common patterns (first.last, first_last, first-last)
+  IFS='._-' read -r first last rest <<< "$lp"
+
+  if [ -n "$first" ] && [ -n "$last" ]; then
+    echo "${first}${last}"      >> "$usernames_tmp"  # johnsmith
+    echo "${first:0:1}${last}"  >> "$usernames_tmp"  # jsmith
+  fi
+done < "$emails_final"
+
+if [ -s "$usernames_tmp" ]; then
+  sort -u "$usernames_tmp" > "$OUTDIR/http/usernames-http.txt"
+  echo -e "${yellow}[*]${end} ${purple}Candidate HTTP usernames (from emails):${end}"
+  while IFS= read -r u; do
+    echo -e "   ${blue}${u}${end}"
+  done < "$OUTDIR/http/usernames-http.txt"
+else
+  echo -e "${yellow}  [!] No usernames could be derived from emails.${end}"
+fi
+
+rm -f "$emails_tmp" "$emails_sorted" "$filtered_tmp" "$usernames_tmp"
+exit 0

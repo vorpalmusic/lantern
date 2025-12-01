@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# http-names — harvest probable person names from HTTP artifacts
+# Usage:
+#   http-names OUTDIR
+#
+# Behavior:
+#   - Scans OUTDIR/http for .html, .htm, .txt files.
+#   - Strips basic HTML tags.
+#   - Extracts "First Last" patterns (two capitalized words).
+#   - De-duplicates.
+#   - DOES NOT filter using deny-names (caller handles this).
+#   - Emits final names to stdout.
+
+OUTDIR="${1:-}"
+
+if [ -z "$OUTDIR" ]; then
+  echo "[!] http-names: Usage: http-names OUTDIR" >&2
+  exit 2
+fi
+
+HTTPDIR="$OUTDIR/http"
+[ -d "$HTTPDIR" ] || exit 0
+
+names_tmp="$(mktemp "${OUTDIR%/}/.http-names.XXXXXX")" || exit 1
+names_sorted="${names_tmp}.sorted"
+
+: > "$names_tmp"
+: > "$names_sorted"
+
+# Grab any .html/.htm/.txt artifact content and extract First Last
+find "$HTTPDIR" -type f \( -name '*.html' -o -name '*.htm' -o -name '*.txt' \) -print0 2>/dev/null \
+  | while IFS= read -r -d '' f; do
+      sed 's/<[^>]*>//g' "$f" 2>/dev/null \
+        | grep -Eo '\b[A-Z][a-z]{1,30}[[:space:]]+[A-Z][a-z]{1,30}\b' 2>/dev/null \
+        || true
+    done >> "$names_tmp"
+
+# Nothing found
+if [ ! -s "$names_tmp" ]; then
+  rm -f "$names_tmp" "$names_sorted"
+  exit 0
+fi
+
+# De-duplicate
+sort -u "$names_tmp" > "$names_sorted"
+
+# Emit final list — NO filtering here
+cat "$names_sorted"
+
+rm -f "$names_tmp" "$names_sorted"
+exit 0

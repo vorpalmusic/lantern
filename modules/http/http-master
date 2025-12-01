@@ -57,29 +57,44 @@ if [ -n "${HTTP_VERIFIED:-}" ]; then
   done
 fi
 
-# --- Emails summary ---
-emails_tmp="$OUTDIR/.emails.tmp"
-: > "$emails_tmp"
-
+# --- Emails + usernames summary (helper) ---
 if [ -n "${HTTP_VERIFIED:-}" ]; then
-  for p in $(echo "$HTTP_VERIFIED" | tr ',' ' '); do
-    p="${p//[^0-9]/}"
-    [ -z "$p" ] && continue
-    f="$OUTDIR/http/$p/emails.txt"
-    [ -s "$f" ] && cat "$f" >> "$emails_tmp"
-  done
+  "$MODDIR/http/http-emails" \
+    "$OUTDIR" \
+    "$TARGET" \
+    --ports "${HTTP_VERIFIED:-}" \
+    --deny-domains "$LISTDIR/deny-domains" \
+    || true
+else
+  echo -e "${yellow}  [!] No HTTP ports to harvest emails from.${end}"
 fi
 
-if [ -s "$emails_tmp" ]; then
-  emails_sorted="$(sort -u "$emails_tmp")"
-  echo -e "${yellow}[*]${end} ${purple}Emails found in page content:${end}"
-  while IFS= read -r e; do
-    echo -e "   ${blue}${e}${end}"
-  done <<< "$emails_sorted"
-else
-  echo -e "${yellow}  [!] No emails found in the pages.${end}"
+# --- Name harvesting from HTTP content ---
+if [ -n "${HTTP_VERIFIED:-}" ]; then
+  raw_names="$("$MODDIR/http/http-names" "$OUTDIR" 2>/dev/null || true)"
+
+  echo -e "${yellow}[*]${end} ${purple}Candidate person names from web pages:${end}"
+
+  if [ -n "$raw_names" ]; then
+    # Apply deny-names filter HERE (not inside http-names)
+    filtered_names="$(printf '%s\n' "$raw_names" \
+      | grep -Fvx -f "$LISTDIR/deny-names" 2>/dev/null \
+      | sed '/^$/d' \
+      | sort -u)"
+
+    if [ -n "$filtered_names" ]; then
+      printf '%s\n' "$filtered_names" > "$OUTDIR/http/names-http.txt"
+
+      while IFS= read -r n; do
+        echo -e "   ${blue}${n}${end}"
+      done <<< "$filtered_names"
+    else
+      echo -e "   ${yellow}<none>${end}"
+    fi
+  else
+    echo -e "   ${yellow}<none>${end}"
+  fi
 fi
-rm -f "$emails_tmp"
 
 # --- Domains enrichment ---
 # Use the actual target (IP/hostname) as the seed; http/enrich reads all HTTP artifacts

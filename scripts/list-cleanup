@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# list-cleanup — de-duplicate and sort simple line-based lists (e.g. deny-domains, deny-names)
+# Usage:
+#   list-cleanup /path/to/list-file
+#
+# Behavior:
+#   - Trims leading/trailing whitespace on each line
+#   - Skips empty lines
+#   - Skips comment lines starting with '#'
+#   - De-duplicates entries (case-insensitive)
+#   - Sorts alphabetically (case-insensitive)
+#   - Rewrites the file in-place
+
+FILE="${1:-}"
+
+if [ -z "$FILE" ]; then
+  echo "Usage: $(basename "$0") /path/to/list-file" >&2
+  exit 2
+fi
+
+if [ ! -f "$FILE" ]; then
+  echo "[!] list-cleanup: file not found: $FILE" >&2
+  exit 1
+fi
+
+if [ ! -w "$FILE" ]; then
+  echo "[!] list-cleanup: file not writable: $FILE" >&2
+  exit 1
+fi
+
+tmp="$(mktemp "${FILE}.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+
+# Normalize:
+#   - strip comments (lines starting with #)
+#   - trim whitespace
+#   - drop empty lines
+# Then:
+#   - sort case-insensitive
+#   - unique (case-insensitive)
+awk '
+  # Drop lines that are just whitespace
+  /^[[:space:]]*$/ { next }
+
+  # Drop full-line comments
+  /^[[:space:]]*#/ { next }
+
+  {
+    # Trim leading/trailing whitespace
+    gsub(/^[[:space:]]+/, "", $0)
+    gsub(/[[:space:]]+$/, "", $0)
+    if (length($0) > 0) print
+  }
+' "$FILE" \
+  | sort -f \
+  | awk '
+      # case-insensitive uniq while preserving original casing
+      {
+        key = tolower($0)
+        if (!(key in seen)) {
+          seen[key] = 1
+          print
+        }
+      }
+    ' > "$tmp"
+
+# Overwrite original file
+mv "$tmp" "$FILE"
+trap - EXIT
+
+echo "[*] list-cleanup: normalized and de-duplicated $FILE"
+exit 0

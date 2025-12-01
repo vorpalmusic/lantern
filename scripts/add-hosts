@@ -248,10 +248,11 @@ else
 fi
 
 is_denied() {
-  local host="$1" pat
-  shopt -s nocasematch 2>/dev/null || true
+  local host_lc="${1,,}" pat
   for pat in "${DENY_PATTERNS[@]}"; do
-    if [[ "$host" =~ $pat ]]; then
+    local pat_lc="${pat,,}"
+    # literal substring match
+    if [[ "$host_lc" == *"$pat_lc"* ]]; then
       return 0
     fi
   done
@@ -402,7 +403,7 @@ fi
 CANDIDATE_COUNT=${#host_ips[@]}
 
 if [ "$CANDIDATE_COUNT" -eq 0 ]; then
-  echo -e "${yellow}[*] [add-hosts]:${end} ${purple}No hostname candidates discovered (mode: $MODE). /etc/hosts unchanged.${end}"
+  echo -e "${yellow}  [!] [add-hosts]:${end} ${purple}No hostname candidates discovered (mode: $MODE). /etc/hosts unchanged.${end}"
   exit 0
 fi
 

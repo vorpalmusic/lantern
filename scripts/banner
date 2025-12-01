@@ -5,7 +5,7 @@ ELLIPSIS="…"
 
 # --- Locate taglines file (override with LANTERN_TAGLINES_FILE) ---
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-${0}}")" && pwd -P)"
-tagfile="${LANTERN_TAGLINES_FILE:-$script_dir/lists/taglines}"
+tagfile="${LANTERN_TAGLINES_FILE:-$script_dir/../lists/taglines}"
 
 # Load taglines (ignore blank lines and lines starting with #)
 if [[ -r "$tagfile" ]]; then
@@ -46,7 +46,7 @@ mapfile -t BANNER <<'ASCII'
  ██         ██    ■  ██  ██   ██  ██     ███     ███████    ████████   ██   ██  ██ 
  ██          █  ██   █   ██   ███ ██     ███     ██         ██     ██  ██   ███ ██ 
  ██       █   █  ██ █    ██    █████     ███  █  ██      █  ██     ██  ██     ████ 
- ██████████   ███████   ███     █████    ██████  █████████  ███    ██ ███      ████  v0.0.26
+ ██████████   ███████   ███     █████    ██████  █████████  ███    ██ ███      ████  v0.0.27
 ASCII
 
 cols=$(tput cols 2>/dev/null || echo 80)
