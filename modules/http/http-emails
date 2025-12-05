@@ -123,7 +123,7 @@ while IFS= read -r e; do
 done < "$emails_sorted"
 
 if [ ! -s "$filtered_tmp" ]; then
-  echo -e "${yellow}  [!] All discovered email domains are denied by deny-domains.${end}"
+  echo -e "${yellow}  [!] All discovered email domains are denied by deny-domains, e.g. w3layouts.com${end}"
   rm -f "$emails_tmp" "$emails_sorted" "$filtered_tmp" "$usernames_tmp"
   exit 0
 fi

@@ -77,13 +77,22 @@ else
   : > "$DEST/emails.txt"
 fi
 
-# --- minimal extra pages: /contact and /about (no spider) ---
+# --- minimal extra pages: /contact[.html] and /about[.html] (no spider) ---
 for extra in contact about; do
-  curl -sL --max-time 8 --user-agent "Mozilla/5.0 (Recon)" \
-    "http://$IP:$PORT/$extra" -o "$DEST/$extra.html" 2>/dev/null || true
+  out="$DEST/${extra}.html"
+  : > "$out"
 
-  if [ -s "$DEST/$extra.html" ]; then
-    grep -Eoi "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" "$DEST/$extra.html" 2>/dev/null \
+  # Prefer /extra.html, fall back to /extra
+  for path in "${extra}.html" "${extra}"; do
+    curl -sL --max-time 8 --user-agent "Mozilla/5.0 (Recon)" \
+      "http://$IP:$PORT/$path" -o "$out" 2>/dev/null || true
+    if [ -s "$out" ]; then
+      break
+    fi
+  done
+
+  if [ -s "$out" ]; then
+    grep -Eoi "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" "$out" 2>/dev/null \
       >> "$DEST/emails.txt" || true
   fi
 done

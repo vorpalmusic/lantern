@@ -73,7 +73,7 @@ fi
 if [ -n "${HTTP_VERIFIED:-}" ]; then
   raw_names="$("$MODDIR/http/http-names" "$OUTDIR" 2>/dev/null || true)"
 
-  echo -e "${yellow}[*]${end} ${purple}Candidate person names from web pages:${end}"
+  echo -e "${yellow}[*]${end} ${purple}Candidate person names from web pages${end} ${yellow}(Add garbage, e.g. About Us, to lists/deny-names)${end}${yellow}:${end}"
 
   if [ -n "$raw_names" ]; then
     # Apply deny-names filter HERE (not inside http-names)
@@ -89,10 +89,10 @@ if [ -n "${HTTP_VERIFIED:-}" ]; then
         echo -e "   ${blue}${n}${end}"
       done <<< "$filtered_names"
     else
-      echo -e "   ${yellow}<none>${end}"
+      echo -e "  ${yellow}[!] No probable names found in the web pages.${end}"
     fi
   else
-    echo -e "   ${yellow}<none>${end}"
+    echo -e "  ${yellow}[!] No probable names found in the web pages.${end}"
   fi
 fi
 

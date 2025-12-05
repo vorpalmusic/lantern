@@ -322,6 +322,58 @@ if [ -s "$CLASS_FILE" ]; then
   [ -z "$service_count" ] && service_count=0
   [ -z "$asrep_count" ] && asrep_count=0
 fi
+############################################
+# Categorized console summary of LDAP accounts
+############################################
+if [ -s "$CLASS_FILE" ]; then
+  tmp_human="$(mktemp)"
+  tmp_service="$(mktemp)"
+  tmp_system="$(mktemp)"
+
+  # Extract SAMs by type, normalize thoroughly
+  awk -F'|' '$1=="HUMAN" {print $2}' "$CLASS_FILE" \
+    | tr -d '\r' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | awk '{print $1}' \
+    | sed '/^$/d' \
+    | sort -u > "$tmp_human"
+
+  awk -F'|' '$1=="SERVICE" {print $2}' "$CLASS_FILE" \
+    | tr -d '\r' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | awk '{print $1}' \
+    | sed '/^$/d' \
+    | sort -u > "$tmp_service"
+
+  awk -F'|' '$1=="SYSTEM" {print $2}' "$CLASS_FILE" \
+    | tr -d '\r' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | awk '{print $1}' \
+    | sed '/^$/d' \
+    | sort -u > "$tmp_system"
+
+  # Helper to join lines with ", "
+  join_csv() {
+    awk 'NF { if (NR>1) printf ", %s", $0; else printf "%s", $0 } END { print "" }' "$1"
+  }
+
+  if [ -s "$tmp_human" ]; then
+    csv="$(join_csv "$tmp_human")"
+    echo -e "${yellow}    [*]${end} ${purple}LDAP HUMAN accounts on ${TARGET}:${PORT}:${end} ${blue}${csv}${end}"
+  fi
+
+  if [ -s "$tmp_service" ]; then
+    csv="$(join_csv "$tmp_service")"
+    echo -e "${yellow}    [*]${end} ${purple}LDAP SERVICE accounts on ${TARGET}:${PORT}:${end} ${blue}${csv}${end}"
+  fi
+
+  if [ -s "$tmp_system" ]; then
+    csv="$(join_csv "$tmp_system")"
+    echo -e "${yellow}    [*]${end} ${purple}LDAP SYSTEM accounts on ${TARGET}:${PORT}:${end} ${blue}${csv}${end}"
+  fi
+
+  rm -f "$tmp_human" "$tmp_service" "$tmp_system"
+fi
 
 ############################################
 ### END OF EXTRACTED BLOCK

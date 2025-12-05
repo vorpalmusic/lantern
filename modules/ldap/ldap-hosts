@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# ldap-hosts — extract probable hostnames/domains from LDAP artifacts
+#
+# Usage:
+#   ldap-hosts OUTDIR
+#
+# Behavior:
+#   - Looks under OUTDIR/ldap/<PORT>/summary.txt
+#   - Pulls:
+#       DOMAIN: <domain>
+#       DC Host: <fqdn>
+#   - Normalizes to lowercase.
+#   - Ignores blank / <unknown> values.
+#   - Writes a de-duplicated list to:
+#       OUTDIR/ldap/hosts_from_ldap.txt
+#
+# Intentionally conservative: only domain + DC host for now.
+
+OUTDIR="${1:-}"
+
+if [ -z "$OUTDIR" ]; then
+  echo "[!] ldap-hosts: Usage: ldap-hosts OUTDIR" >&2
+  exit 2
+fi
+
+LDAPDIR="$OUTDIR/ldap"
+[ -d "$LDAPDIR" ] || exit 0
+
+# Optional colors (no hard dependency)
+ROOTDIR="$(cd -- "$(dirname -- "$0")"/../.. >/dev/null 2>&1 && pwd)"
+if [ -f "$ROOTDIR/lib/colors" ]; then
+  # shellcheck source=/dev/null
+  . "$ROOTDIR/lib/colors"
+else
+  yellow=""; purple=""; blue=""; end=""
+fi
+
+tmp_hosts="$(mktemp "${OUTDIR%/}/.ldap-hosts.XXXXXX")" || exit 1
+: > "$tmp_hosts"
+
+# Walk per-port LDAP dirs and harvest DOMAIN/DC Host lines
+while IFS= read -r -d '' summary; do
+  [ -s "$summary" ] || continue
+
+  # DOMAIN: line
+  domain="$(grep -Ei '^DOMAIN:' "$summary" 2>/dev/null \
+            | sed -E 's/^DOMAIN:[[:space:]]*//I' \
+            | tr -d '\r' \
+            | head -n1)"
+
+  # DC Host: line
+  dc_host="$(grep -Ei '^DC Host:' "$summary" 2>/dev/null \
+             | sed -E 's/^DC Host:[[:space:]]*//I' \
+             | tr -d '\r' \
+             | head -n1)"
+
+  # Normalize + filter out blanks and <unknown>
+  if [ -n "$domain" ]; then
+    d_lc="${domain,,}"
+    if [ "$d_lc" != "<unknown>" ]; then
+      printf '%s\n' "$d_lc" >> "$tmp_hosts"
+    fi
+  fi
+
+  if [ -n "$dc_host" ]; then
+    h_lc="${dc_host,,}"
+    if [ "$h_lc" != "<unknown>" ]; then
+      printf '%s\n' "$h_lc" >> "$tmp_hosts"
+    fi
+  fi
+
+done < <(find "$LDAPDIR" -mindepth 2 -maxdepth 2 -type f -name 'summary.txt' -print0 2>/dev/null)
+
+# Nothing found
+if [ ! -s "$tmp_hosts" ]; then
+  rm -f "$tmp_hosts"
+  echo -e "${yellow}[*]${end} ${purple}[ldap-hosts]: no DOMAIN/DC Host entries found under${end} ${blue}${LDAPDIR}${end}"
+  exit 0
+fi
+
+# Deduplicate and write final list
+out_file="$LDAPDIR/hosts_from_ldap.txt"
+sort -u "$tmp_hosts" > "$out_file"
+count="$(wc -l < "$out_file" 2>/dev/null || echo 0)"
+
+rm -f "$tmp_hosts"
+
+echo -e "${yellow}[*]${end} ${purple}[ldap-hosts]: wrote${end} ${blue}${count}${end} ${purple}entry(ies) to${end} ${blue}${out_file}${end}"
+exit 0

@@ -1,30 +1,26 @@
 #!/usr/bin/env bash
-# dns-master — DNS enumeration using dig (+ optional dnsenum, SRV, CHAOS, light sub-brute)
+# dns-master — trimmed DNS helper for Lantern (pentest-focused)
+#
 # Usage:
 #   dns-master OUTDIR TARGET [TARGETED_XML] [PORTS]
 #
 # Behavior:
-#   - If TARGET is an IP: do reverse lookup (PTR); use PTR hostname as domain guess if present.
-#   - If TARGET looks like a hostname: use it directly as domain guess.
-#   - For each DNS-ish port (53, 853) we:
-#       * Query core records via system resolver and directly against TARGET:PORT.
-#       * Extract NS and attempt AXFR (zone transfer) per NS.
-#       * Query CHAOS TXT (version.bind, hostname.bind, id.server) against TARGET:PORT.
-#       * Query key SRV records (AD/LDAP/Kerberos/etc.) if a domain guess exists.
-#       * Perform a tiny subdomain brute against TARGET:PORT with a built-in short list.
-#       * Collect discovered hostnames into hosts_from_dns.txt.
-#       * Write artifacts under OUTDIR/dns/<PORT>/:
-#           summary.txt         — everything in one place
-#           reverse.txt         — PTR lookups
-#           records.txt         — A/AAAA/MX/TXT/NS/SOA answers
-#           ns.txt              — NS list
-#           zone-transfer.txt   — AXFR attempts/results
-#           chaos.txt           — CHAOS TXT results (if any)
-#           srv.txt             — SRV answers (AD-ish, etc.)
-#           subdomains.txt      — tiny sub-bruteforce results
-#           hosts_from_dns.txt  — hostnames extracted from SRV/subdomains
-#           dnsenum.txt         — only on port 53 when dnsenum runs
-#   - If dnsenum is installed and domain guess looks like a domain, run it once on port 53.
+#   - Always:
+#       * Do a PTR lookup for TARGET via system resolver and save it.
+#   - If PTR yields a usable FQDN (has letters + a dot):
+#       * domain_guess = everything after the first label.
+#       * Query key AD SRV records via system resolver:
+#           _ldap._tcp.dc._msdcs.domain
+#           _kerberos._tcp.domain
+#           _kerberos._udp.domain
+#           _kpasswd._tcp.domain
+#           _kpasswd._udp.domain
+#       * Extract hostnames from SRV answers into hosts_from_dns.txt.
+#   - CHAOS:
+#       * Always try version.bind / hostname.bind / id.server against TARGET:DNS_PORT
+#         (where DNS_PORT is 53 by default or the first DNS-ish port from PORTS).
+#       * Dig calls have tight timeouts so they can’t hang.
+#   - No dnsenum, no brute-forcing, no A/MX/TXT/NS/SOA spam.
 
 ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../.." >/dev/null 2>&1 && pwd)"
 . "$ROOTDIR/lib/colors"
@@ -39,9 +35,9 @@ Usage:
 Positional:
   OUTDIR       Target output directory (per-host root used by Lantern)
   TARGET       IP or hostname (as used by nmap core)
-  TARGETED_XML Optional nmap -sCV XML (currently unused)
-  PORTS        Optional comma-separated DNS ports (e.g. "53" or "53,853")
-               If omitted, defaults to 53.
+  TARGETED_XML Optional nmap -sCV XML (unused for now)
+  PORTS        Optional comma-separated ports; first DNS-ish (53/853)
+               is used as the CHAOS target port. Defaults to 53.
 EOF
   exit 1
 }
@@ -60,33 +56,12 @@ if ! command -v dig >/dev/null 2>&1; then
   exit 0
 fi
 
-mkdir -p "$OUTDIR/dns"
+# Tunables
+DIG_TIME="${DIG_TIME:-5}"       # seconds per dig query
+DIG_TRIES="${DIG_TRIES:-1}"     # tries per dig query
 
-echo -e "${yellow}[*]${end} ${purple}DNS module started for target${end} ${blue}${TARGET}${end}"
-
-# --- Determine if TARGET is IPv4 and derive a "domain guess" ---
-
-is_ipv4=false
-if [[ "$TARGET" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-  is_ipv4=true
-fi
-
-domain_guess=""
-
-# Reverse lookup via system resolver to derive domain_guess when TARGET is IP
-if [ "$is_ipv4" = true ]; then
-  ptr_host="$(dig -x "$TARGET" +short 2>/dev/null | tr -d '\r' | head -n1)"
-  if [ -n "$ptr_host" ]; then
-    domain_guess="${ptr_host%.}"   # strip trailing dot if present
-  fi
-else
-  domain_guess="$TARGET"
-fi
-
-# --- Ports: limit to DNS-ish ports (53, 853) for now ---
-
-ports=()
-
+# Pick a DNS port to talk CHAOS to (53 by default)
+DNS_PORT=53
 if [ -n "$PORTS_ARG" ]; then
   IFS=',' read -r -a raw_ports <<< "$PORTS_ARG"
   for p in "${raw_ports[@]}"; do
@@ -94,338 +69,156 @@ if [ -n "$PORTS_ARG" ]; then
     [ -z "$p_clean" ] && continue
     case "$p_clean" in
       53|853)
-        ports+=("$p_clean")
-        ;;
-      *)
-        # Ignore other ports here; dispatch should only feed DNS-ish ports.
+        DNS_PORT="$p_clean"
+        break
         ;;
     esac
   done
 fi
 
-# Default to 53 if nothing usable was provided
-if [ "${#ports[@]}" -eq 0 ]; then
-  ports=(53)
+DNSDIR="$OUTDIR/dns/$DNS_PORT"
+mkdir -p "$DNSDIR"
+
+SUMMARY_FILE="$DNSDIR/summary.txt"
+REVERSE_FILE="$DNSDIR/reverse.txt"
+SRV_FILE="$DNSDIR/srv.txt"
+CHAOS_FILE="$DNSDIR/chaos.txt"
+HOSTS_DNS_FILE="$DNSDIR/hosts_from_dns.txt"
+
+: >"$SUMMARY_FILE"
+: >"$REVERSE_FILE"
+: >"$SRV_FILE"
+: >"$CHAOS_FILE"
+: >"$HOSTS_DNS_FILE"
+
+echo -e "${yellow}[*]${end} ${purple}DNS module started for target${end} ${blue}${TARGET}${end}"
+
+# --- PTR lookup (system resolver only) ---
+
+PTR_FQDN="$(dig -x "$TARGET" +short +time="$DIG_TIME" +tries="$DIG_TRIES" 2>/dev/null | tr -d '\r' | head -n1)"
+
+{
+  echo "==== DNS Module Start ===="
+  echo "Target:       $TARGET"
+  echo "DNS port:     $DNS_PORT"
+  echo
+  echo "==== Reverse lookup (PTR) via system resolver ===="
+  if [ -n "$PTR_FQDN" ]; then
+    echo "$PTR_FQDN"
+  else
+    echo "<no PTR via system resolver>"
+  fi
+  echo
+} | tee "$REVERSE_FILE" >>"$SUMMARY_FILE"
+
+# --- Derive domain_guess from PTR FQDN ---
+
+domain_guess=""
+
+if [ -n "$PTR_FQDN" ]; then
+  # strip trailing dot
+  fqdn="${PTR_FQDN%.}"
+
+  # Require at least one letter and at least one dot
+  if [[ "$fqdn" =~ [A-Za-z] ]] && [[ "$fqdn" == *.* ]]; then
+    # Drop first label: host.domain.tld -> domain.tld
+    domain_guess="${fqdn#*.}"
+  fi
 fi
 
-# Decide whether we will run dnsenum (once) and on which port dir
-dnsenum_port=""
-if command -v dnsenum >/dev/null 2>&1 && [ -n "$domain_guess" ] && [[ "$domain_guess" == *.* ]]; then
-  # Only run dnsenum when 53 is present; that's the sane place to attach it.
-  for p in "${ports[@]}"; do
-    if [ "$p" = "53" ]; then
-      dnsenum_port="53"
-      break
-    fi
-  done
-fi
-
-# Tiny built-in subdomain list (deliberately small)
-sub_brute_words=(
-  www
-  mail
-  webmail
-  owa
-  vpn
-  dev
-  test
-  api
-  portal
-  intranet
-  gw
-  rdp
-  dc
-  dc01
-  dc02
-  files
-  fs
-  sql
-  stage
-  staging
-)
-
-for PORT in "${ports[@]}"; do
-  DNSDIR="$OUTDIR/dns/$PORT"
-  mkdir -p "$DNSDIR"
-
-  SUMMARY_FILE="$DNSDIR/summary.txt"
-  REVERSE_FILE="$DNSDIR/reverse.txt"
-  RECORDS_FILE="$DNSDIR/records.txt"
-  NS_FILE="$DNSDIR/ns.txt"
-  AXFR_FILE="$DNSDIR/zone-transfer.txt"
-  CHAOS_FILE="$DNSDIR/chaos.txt"
-  SRV_FILE="$DNSDIR/srv.txt"
-  SUBDOM_FILE="$DNSDIR/subdomains.txt"
-  HOSTS_DNS_FILE="$DNSDIR/hosts_from_dns.txt"
-  DNSENUM_FILE="$DNSDIR/dnsenum.txt"
-
-  : >"$SUMMARY_FILE"
-  : >"$REVERSE_FILE"
-  : >"$RECORDS_FILE"
-  : >"$NS_FILE"
-  : >"$AXFR_FILE"
-  : >"$CHAOS_FILE"
-  : >"$SRV_FILE"
-  : >"$SUBDOM_FILE"
-  : >"$HOSTS_DNS_FILE"
-  : >"$DNSENUM_FILE"
-
-  case "$PORT" in
-    53)
-      port_label="DNS (standard port 53)"
-      ;;
-    853)
-      port_label="DNS over TLS candidate (port 853)"
-      ;;
-    *)
-      port_label="DNS-like service on non-standard port $PORT"
-      ;;
-  esac
-
+if [ -z "$domain_guess" ]; then
   {
-    echo "==== DNS Module Start ===="
-    echo "Target:       $TARGET"
-    echo "Port:         $PORT"
-    echo "Port label:   $port_label"
-    echo "Domain guess: ${domain_guess:-<none>}"
+    echo "==== Domain guess ===="
+    echo "PTR did not yield a usable FQDN with letters; skipping SRV/domain-based DNS enum."
+    echo
+  } >>"$SUMMARY_FILE"
+else
+  {
+    echo "==== Domain guess ===="
+    echo "PTR FQDN:     ${PTR_FQDN:-<none>}"
+    echo "Domain guess: $domain_guess"
     echo
   } >>"$SUMMARY_FILE"
 
-  # --- Reverse lookups (PTR) ---
+  # --- AD / SRV records via system resolver only ---
 
   {
-    echo "==== Reverse lookup (PTR) via system resolver ===="
-    if [ "$is_ipv4" = true ]; then
-      dig -x "$TARGET" +short 2>/dev/null || echo "<no PTR via system resolver>"
-    else
-      echo "<target not an IPv4 address>"
-    fi
-    echo
-    echo "==== Reverse lookup (PTR) via $TARGET:$PORT ===="
-    if [ "$is_ipv4" = true ]; then
-      dig -x "$TARGET" @"$TARGET" -p "$PORT" +short 2>/dev/null || echo "<no PTR via $TARGET:$PORT>"
-    else
-      echo "<target not an IPv4 address>"
-    fi
-    echo
-  } | tee "$REVERSE_FILE" >>"$SUMMARY_FILE"
+    echo "==== AD / SRV records for $domain_guess (system resolver) ===="
+  } | tee -a "$SRV_FILE" >>"$SUMMARY_FILE"
 
-  ns_count=0
+  srv_names=(
+    "_ldap._tcp.dc._msdcs.${domain_guess}"
+    "_kerberos._tcp.${domain_guess}"
+    "_kerberos._udp.${domain_guess}"
+    "_kpasswd._tcp.${domain_guess}"
+    "_kpasswd._udp.${domain_guess}"
+  )
 
-  # --- Forward lookups & core records only if we have a domain guess ---
-  if [ -n "$domain_guess" ]; then
+  for s in "${srv_names[@]}"; do
+    out="$(dig "$s" SRV +short +time="$DIG_TIME" +tries="$DIG_TRIES" 2>/dev/null | tr -d '\r')"
     {
-      echo "==== Forward lookups for: $domain_guess ===="
-      echo "-- A records (system resolver) --"
-      dig "$domain_guess" A +noall +answer 2>/dev/null || true
-      echo
-      echo "-- A records (@$TARGET#$PORT) --"
-      dig "$domain_guess" A @"$TARGET" -p "$PORT" +noall +answer 2>/dev/null || true
-      echo
-      echo "-- AAAA records (system resolver) --"
-      dig "$domain_guess" AAAA +noall +answer 2>/dev/null || true
-      echo
-      echo "-- AAAA records (@$TARGET#$PORT) --"
-      dig "$domain_guess" AAAA @"$TARGET" -p "$PORT" +noall +answer 2>/dev/null || true
-      echo
-      echo "-- MX records (system resolver) --"
-      dig "$domain_guess" MX +noall +answer 2>/dev/null || true
-      echo
-      echo "-- MX records (@$TARGET#$PORT) --"
-      dig "$domain_guess" MX @"$TARGET" -p "$PORT" +noall +answer 2>/dev/null || true
-      echo
-      echo "-- TXT records (system resolver) --"
-      dig "$domain_guess" TXT +noall +answer 2>/dev/null || true
-      echo
-      echo "-- TXT records (@$TARGET#$PORT) --"
-      dig "$domain_guess" TXT @"$TARGET" -p "$PORT" +noall +answer 2>/dev/null || true
-      echo
-      echo "-- NS records (system resolver) --"
-      dig "$domain_guess" NS +noall +answer 2>/dev/null || true
-      echo
-      echo "-- NS records (@$TARGET#$PORT) --"
-      dig "$domain_guess" NS @"$TARGET" -p "$PORT" +noall +answer 2>/dev/null || true
-      echo
-      echo "-- SOA record (system resolver) --"
-      dig "$domain_guess" SOA +noall +answer 2>/dev/null || true
-      echo
-      echo "-- SOA record (@$TARGET#$PORT) --"
-      dig "$domain_guess" SOA @"$TARGET" -p "$PORT" +noall +answer 2>/dev/null || true
-      echo
-    } | tee "$RECORDS_FILE" >>"$SUMMARY_FILE"
-
-    # Extract NS servers (system + direct) -> ns.txt
-    {
-      dig "$domain_guess" NS +short 2>/dev/null || true
-      dig "$domain_guess" NS @"$TARGET" -p "$PORT" +short 2>/dev/null || true
-    } | sed -e 's/\.$//' | sort -u | sed '/^$/d' >"$NS_FILE" || true
-
-    if [ -s "$NS_FILE" ]; then
-      ns_count="$(wc -l < "$NS_FILE" 2>/dev/null || echo 0)"
-    else
-      ns_count=0
-    fi
-
-    # --- Mail-related TXT (SPF/DMARC) quick view ---
-    {
-      echo "==== Mail-related TXT (SPF/DMARC) for $domain_guess (system resolver) ===="
-      dig "$domain_guess" TXT +short 2>/dev/null \
-        | grep -Ei 'v=spf1|v=DMARC1' || echo "<no explicit SPF/DMARC TXT found>"
-      echo
-    } >>"$SUMMARY_FILE"
-
-    # --- AXFR attempts per NS ---
-    if [ "$ns_count" -gt 0 ]; then
-      {
-        echo "==== AXFR attempts (zone transfer) for $domain_guess ===="
-      } >>"$SUMMARY_FILE"
-
-      while IFS= read -r ns; do
-        [ -z "$ns" ] && continue
-        {
-          echo "---- AXFR attempt: domain=$domain_guess ns=$ns ----"
-          dig "$domain_guess" AXFR @"$ns" +time=10 +tries=1 2>/dev/null || echo "<AXFR failed or refused>"
-          echo
-        } | tee -a "$AXFR_FILE" >>"$SUMMARY_FILE"
-      done <"$NS_FILE"
-    else
-      {
-        echo "==== AXFR attempts ===="
-        echo "No NS records discovered; skipping AXFR."
-        echo
-      } >>"$SUMMARY_FILE"
-    fi
-
-    # --- CHAOS TXT (version.bind / hostname.bind / id.server) ---
-    chaos_buf=""
-    for chaos_name in version.bind hostname.bind id.server; do
-      out="$(dig "$chaos_name" TXT CH @"$TARGET" -p "$PORT" +short 2>/dev/null | tr -d '\r')"
+      echo "-- $s SRV (system) --"
       if [ -n "$out" ]; then
-        chaos_buf+=$'\n'"$chaos_name (CHAOS TXT):"
-        chaos_buf+=$'\n'"$out"$'\n'
+        printf '%s\n' "$out"
+      else
+        echo "<no answer>"
       fi
-    done
-
-    if [ -n "$chaos_buf" ]; then
-      {
-        echo "==== CHAOS TXT (version.bind / hostname.bind / id.server) ===="
-        printf '%s\n' "$chaos_buf"
-        echo
-      } | tee "$CHAOS_FILE" >>"$SUMMARY_FILE"
-    else
-      {
-        echo "==== CHAOS TXT ===="
-        echo "No CHAOS TXT responses from $TARGET:$PORT."
-        echo
-      } | tee "$CHAOS_FILE" >>"$SUMMARY_FILE"
-    fi
-
-    # --- AD / SRV records (if domain_guess looks domain-ish) ---
-    if [[ "$domain_guess" == *.* ]]; then
-      {
-        echo "==== AD / SRV records for $domain_guess (@$TARGET#$PORT) ===="
-      } | tee -a "$SRV_FILE" >>"$SUMMARY_FILE"
-
-      srv_names=(
-        "_ldap._tcp.${domain_guess}"
-        "_ldap._tcp.dc._msdcs.${domain_guess}"
-        "_kerberos._tcp.${domain_guess}"
-        "_kerberos._udp.${domain_guess}"
-        "_kpasswd._tcp.${domain_guess}"
-        "_kpasswd._udp.${domain_guess}"
-        "_gc._tcp.${domain_guess}"
-      )
-
-      for s in "${srv_names[@]}"; do
-        out="$(dig "$s" SRV @"$TARGET" -p "$PORT" +short 2>/dev/null | tr -d '\r')"
-        {
-          echo "-- $s SRV --"
-          if [ -n "$out" ]; then
-            printf '%s\n' "$out"
-          else
-            echo "<no answer>"
-          fi
-          echo
-        } | tee -a "$SRV_FILE" >>"$SUMMARY_FILE"
-
-        # Extract targets from SRV answers into hosts_from_dns.txt
-        if [ -n "$out" ]; then
-          while IFS= read -r line; do
-            # Typical SRV: priority weight port target
-            host_field="$(printf '%s\n' "$line" | awk '{print $4}')"
-            host_field="${host_field%.}"
-            [ -n "$host_field" ] && printf '%s\n' "$host_field" >>"$HOSTS_DNS_FILE"
-          done <<< "$out"
-        fi
-      done
-    fi
-
-    # --- Tiny subdomain bruteforce (@TARGET#$PORT) ---
-    if [[ "$domain_guess" == *.* ]]; then
-      {
-        echo "==== Tiny subdomain brute (@$TARGET#$PORT) for *.$domain_guess ===="
-      } | tee -a "$SUBDOM_FILE" >>"$SUMMARY_FILE"
-
-      for sub in "${sub_brute_words[@]}"; do
-        fqdn="${sub}.${domain_guess}"
-        a_out="$(dig "$fqdn" A @"$TARGET" -p "$PORT" +short 2>/dev/null | tr -d '\r')"
-        if [ -n "$a_out" ]; then
-          line="${fqdn} ${a_out}"
-          printf '%s\n' "$line" | tee -a "$SUBDOM_FILE" >>"$SUMMARY_FILE"
-          printf '%s\n' "$fqdn" >>"$HOSTS_DNS_FILE"
-        fi
-      done
-
-      echo >>"$SUMMARY_FILE"
-    fi
-
-  else
-    {
-      echo "==== Forward lookups ===="
-      echo "No domain guess derived; only reverse lookups performed."
       echo
-    } >>"$SUMMARY_FILE"
-  fi
+    } | tee -a "$SRV_FILE" >>"$SUMMARY_FILE"
 
-  # --- dnsenum (only once, on port 53) ---
-  if [ -n "$dnsenum_port" ] && [ "$PORT" = "$dnsenum_port" ]; then
-    echo -e "${yellow}[*]${end} ${purple}Running dnsenum against${end} ${blue}${domain_guess}${end} ${purple}(attached to port 53).${end}"
-    {
-      echo "==== dnsenum output for $domain_guess ===="
-      dnsenum "$domain_guess" 2>&1 || echo "<dnsenum failed>"
-      echo
-    } | tee "$DNSENUM_FILE" >>"$SUMMARY_FILE"
-  fi
+    # Extract targets from SRV answers into hosts_from_dns.txt
+    if [ -n "$out" ]; then
+      while IFS= read -r line; do
+        host_field="$(printf '%s\n' "$line" | awk '{print $4}')"
+        host_field="${host_field%.}"
+        # only keep things that look like hostnames (has a dot and at least one letter)
+        if [[ "$host_field" == *.* ]] && [[ "$host_field" =~ [A-Za-z] ]]; then
+          printf '%s\n' "$host_field" >>"$HOSTS_DNS_FILE"
+        fi
+      done <<< "$out"
+    fi
+  done
 
-  # --- Deduplicate hosts_from_dns.txt if anything is there ---
+  # Deduplicate hosts_from_dns.txt if anything is there
   if [ -s "$HOSTS_DNS_FILE" ]; then
     sort -u "$HOSTS_DNS_FILE" -o "$HOSTS_DNS_FILE" 2>/dev/null || true
   fi
+fi
 
-  # --- Per-port summary footer ---
-  {
-    echo "==== DNS Port Summary ===="
-    echo "Target:        $TARGET"
-    echo "Port:          $PORT"
-    echo "Port label:    $port_label"
-    echo "Domain guess:  ${domain_guess:-<none>}"
-    echo "NS count:      $ns_count"
-    echo "Reverse file:  $REVERSE_FILE"
-    echo "Records file:  $RECORDS_FILE"
-    echo "NS list file:  $NS_FILE"
-    echo "AXFR file:     $AXFR_FILE"
-    echo "CHAOS file:    $CHAOS_FILE"
-    echo "SRV file:      $SRV_FILE"
-    echo "Subdomains:    $SUBDOM_FILE"
-    echo "Hosts from DNS:$HOSTS_DNS_FILE"
-    if [ -n "$dnsenum_port" ] && [ "$PORT" = "$dnsenum_port" ]; then
-      echo "dnsenum file:  $DNSENUM_FILE"
-    fi
-    echo
-  } >>"$SUMMARY_FILE"
+# --- CHAOS TXT (version.bind / hostname.bind / id.server) against TARGET:DNS_PORT ---
 
-  echo -e "${yellow}[*]${end} ${purple}DNS module completed for port${end} ${blue}${PORT}${end}"
+chaos_buf=""
+for chaos_name in version.bind hostname.bind id.server; do
+  out="$(dig "$chaos_name" TXT CH @"$TARGET" -p "$DNS_PORT" +short +time="$DIG_TIME" +tries="$DIG_TRIES" 2>/dev/null | tr -d '\r')"
+  if [ -n "$out" ]; then
+    chaos_buf+=$'\n'"$chaos_name (CHAOS TXT):"
+    chaos_buf+=$'\n'"$out"$'\n'
+  fi
 done
+
+{
+  echo "==== CHAOS TXT (version.bind / hostname.bind / id.server) ===="
+  if [ -n "$chaos_buf" ]; then
+    printf '%s\n' "$chaos_buf"
+  else
+    echo "No CHAOS TXT responses from $TARGET:$DNS_PORT."
+  fi
+  echo
+} | tee "$CHAOS_FILE" >>"$SUMMARY_FILE"
+
+# --- Final summary ---
+
+{
+  echo "==== DNS Summary ===="
+  echo "Target:        $TARGET"
+  echo "DNS port:      $DNS_PORT"
+  echo "PTR FQDN:      ${PTR_FQDN:-<none>}"
+  echo "Domain guess:  ${domain_guess:-<none>}"
+  echo "SRV file:      $SRV_FILE"
+  echo "CHAOS file:    $CHAOS_FILE"
+  echo "Hosts from DNS:$HOSTS_DNS_FILE"
+  echo
+} >>"$SUMMARY_FILE"
 
 echo -e "${yellow}[+]${end} ${purple}DNS module finished for target${end} ${blue}${TARGET}${end}"
 exit 0

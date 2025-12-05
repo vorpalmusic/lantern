@@ -582,5 +582,16 @@ fi
   echo -e "${yellow}    [*]${end} ${purple}LDAP enumeration finished for${end} ${blue}${TARGET}:${PORT}${end} ${purple}(users: $users_count, groups: $groups_count, computers: $computers_count, SPNs: $spn_count)${end}"
 done
 
+# --- Once all ports are processed, derive LDAP hosts and feed add-hosts ---
+if [ -x "$ROOTDIR/modules/ldap/ldap-hosts" ]; then
+  "$ROOTDIR/modules/ldap/ldap-hosts" "$OUTDIR"
+fi
+
+ADD_HOSTS="$ROOTDIR/scripts/add-hosts"
+if [ -x "$ADD_HOSTS" ]; then
+  # Run in ldap mode; let its normal output show, but don't kill ldap-master if it fails
+  "$ADD_HOSTS" "$OUTDIR" "$TARGET" --mode ldap || true
+fi
+
 echo -e "${yellow}[+]${end} ${purple}LDAP module finished for target${end} ${blue}${TARGET}${end}"
 exit 0

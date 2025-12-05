@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# add-hosts — append missing "IP hostname" pairs from Nmap XML + HTTP probes to /etc/hosts
+# add-hosts — append missing "IP hostname" pairs from Nmap XML + HTTP/LDAP probes to /etc/hosts
 # Usage:
-#   add-hosts OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose] [--mode nmap|http|all]
+#   add-hosts OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose] [--mode nmap|http|ldap|all]
 
 ROOTDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
 . "$ROOTDIR/lib/colors"
@@ -170,7 +170,7 @@ upsert_host_entry() {
 }
 
 if [ "$#" -lt 2 ]; then
-  echo "Usage: $0 OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose] [--mode nmap|http|all]" >&2
+  echo "Usage: $0 OUTDIR IP [PORTS] [--dry-run] [--allow-regex '<regex>'] [--deny-file <path>] [--verbose] [--mode nmap|http|ldap|all]" >&2
   exit 2
 fi
 
@@ -210,7 +210,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --mode)
       shift
-      MODE="${1:-all}"   # nmap | http | all
+      MODE="${1:-all}"   # nmap | http | ldap | all
       ;;
     --*)
       ARGS+=("$1")
@@ -270,6 +270,11 @@ add_candidate() {
 
   [[ -z "$nm" ]] && return 0
   nm="${nm%.}"   # drop trailing dot if any
+
+  # kill obvious junk
+  if [ "${nm,,}" = "<unknown>" ]; then
+    return 0
+  fi
 
   # require domain-ish token, skip bare IPs etc.
   if ! [[ "$nm" =~ $DOMAIN_RE ]]; then
@@ -356,7 +361,7 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
     [ "$VERBOSE" -eq 1 ] && echo -e "${yellow}[!] [add-hosts]: no HTTP artifacts under $OUTDIR/http or $OUTDIR/report/http${end}" >&2
   fi
 
-  # --- 3) harvest domains from http-collected emails and verify via Host header ---
+  # --- HTTP email-derived domains verified via Host header ---
   if [ -n "$HTTP_ROOT" ] && [ -d "$HTTP_ROOT" ] && [ -n "${PORTS_ARG:-}" ]; then
     email_domains_file="$(mktemp)"
     trap 'rm -f "$email_domains_file"' EXIT
@@ -399,11 +404,25 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
   fi
 fi
 
+# ---------- 3) Harvest hostnames from LDAP artifacts (mode ldap/all) ----------
+if [[ "$MODE" == "all" || "$MODE" == "ldap" ]]; then
+  LDAP_HOST_FILE="$OUTDIR/ldap/hosts_from_ldap.txt"
+
+  if [ -s "$LDAP_HOST_FILE" ]; then
+    echo -e "\n${yellow}[*] [add-hosts]:${end} ${purple}Harvesting hostnames from LDAP artifacts...${end}"
+    while IFS= read -r nm; do
+      add_candidate "$nm" "$IP"
+    done < "$LDAP_HOST_FILE"
+  else
+    [ "$VERBOSE" -eq 1 ] && echo -e "${yellow}[!] [add-hosts]: no LDAP hosts file at $LDAP_HOST_FILE${end}" >&2
+  fi
+fi
+
 # --- final application to /etc/hosts ---
 CANDIDATE_COUNT=${#host_ips[@]}
 
 if [ "$CANDIDATE_COUNT" -eq 0 ]; then
-  echo -e "${yellow}  [!] [add-hosts]:${end} ${purple}No hostname candidates discovered (mode: $MODE). /etc/hosts unchanged.${end}"
+  echo -e "${yellow}  [!] [add-hosts]: No hostname candidates discovered (mode: $MODE). /etc/hosts unchanged.${end}"
   exit 0
 fi
 
@@ -430,7 +449,7 @@ done
 if [ "$NEW_HOSTS_ADDED" -gt 0 ]; then
   echo -e "${yellow}[*] [add-hosts]:${end} ${green}Updated /etc/hosts with ${NEW_HOSTS_ADDED} entr(ies).${end}"
 else
-  echo -e "${yellow}[*] [add-hosts]:${end} ${purple}/etc/hosts already up-to-date for discovered hostnames.${end}"
+  echo -e "${yellow}[*] [add-hosts]: /etc/hosts already up-to-date for discovered hostnames.${end}"
 fi
 
 exit 0

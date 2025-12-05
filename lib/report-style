@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# report-style — emit shared CSS + opening container for Lantern HTML report
+
+cat <<'HEAD'
+<style>
+#lantern-report{
+  font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans","Liberation Sans",sans-serif;
+  margin:2rem 0;
+  border-top:2px solid #e5e7eb;
+  padding-top:1rem;
+}
+#lantern-report h2{margin:0 0 .75rem;font-size:1.35rem}
+#lantern-report h3{margin:1rem 0 .5rem;font-size:1.1rem}
+#lantern-report h4{margin:.6rem 0 .3rem;font-size:1.02rem}
+#lantern-report .lantern-port{
+  border:1px solid #e5e7eb;
+  border-radius:10px;
+  padding:12px;
+  margin:10px 0;
+  max-width:100%;
+  overflow-wrap:break-word;
+}
+#lantern-report .lantern-meta{color:#555;font-size:.9rem;margin-bottom:.4rem}
+#lantern-report code{background:#f6f8fa;padding:0 .3rem;border-radius:6px}
+#lantern-report .lantern-files a{text-decoration:none}
+
+/* Notable SSH block */
+#lantern-report .lantern-ssh-notable{
+  color:#b91c1c;
+  font-weight:600;
+}
+#lantern-report .lantern-ssh-notable pre{
+  margin:.25rem 0 0;
+  padding:.25rem .5rem;
+  background:#fef2f2;
+  border-radius:4px;
+  font-size:.8rem;
+}
+
+/* Shared two-column tool output */
+#lantern-report pre.lantern-pre-twocol{
+  /* No internal scrollbars; wrap long tokens */
+  max-height:none;
+  overflow:visible;
+  background:#020617;
+  color:#e5e7eb;
+  padding:.5rem .75rem;
+  border-radius:6px;
+  font-size:.8rem;
+  column-count:2;
+  column-gap:1.5rem;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+</style>
+<section id="lantern-report">
+  <h2>Lantern Modules</h2>
+HEAD

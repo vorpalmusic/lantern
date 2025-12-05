@@ -79,5 +79,5 @@ fi
 
 echo "EXCHANGE_SMELL=$exchange_smell" >"$STATUS_FILE"
 
-echo -e "${cyan}    [*] [ldap-groups]: high-priv groups + service smells analyzed for LDAP${end} ${blue}port $PORT${end}"
+echo -e "${yellow}    [*] [ldap-groups]:${end} ${purple}high-priv groups + service smells analyzed for LDAP on:${end} ${blue}port $PORT${end}"
 exit 0

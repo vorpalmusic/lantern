@@ -35,6 +35,9 @@ has_ldap=false
 # crude single ftp port tracking (most boxes: 21)
 ftp_port=""
 
+# track HTTP ports
+http_ports=()
+
 # track DNS ports (e.g., 53, 853)
 dns_ports=()
 
@@ -51,10 +54,11 @@ if [ -n "${PORTS:-}" ]; then
     # SSH
     [ "$p" = "22" ] && has_ssh=true
 
-    # HTTP-ish
+    # HTTP-ish (common ports)
     case "$p" in
       80|443|8080|8443)
         has_http=true
+        http_ports+=("$p")
         ;;
     esac
 
@@ -86,9 +90,28 @@ fi
 # NOTE: we DO NOT use XML to "discover" DNS or LDAP. If those exist, they must
 # be surfaced via PORTS. XML is only used where it already was (SSH/HTTP/FTP).
 if [ -n "${TARGETED_XML:-}" ] && [ -s "$TARGETED_XML" ]; then
-  if grep -qi 'service name="ssh"' "$TARGETED_XML";   then has_ssh=true;  fi
-  if grep -qi 'service name="http"' "$TARGETED_XML";  then has_http=true; fi
-  if grep -qi 'service name="https"' "$TARGETED_XML"; then has_http=true; fi
+  if grep -qi 'service name="ssh"' "$TARGETED_XML"; then
+    has_ssh=true
+  fi
+
+  # HTTP from XML (any port, not just 80/443/8080/8443)
+  if grep -qi 'service name="http"' "$TARGETED_XML"; then
+    has_http=true
+    while read -r hp; do
+      [ -z "$hp" ] && continue
+      http_ports+=("$hp")
+    done < <(grep -i 'service name="http"' "$TARGETED_XML" \
+              | sed -E 's/.*portid="([0-9]+)".*/\1/')
+  fi
+
+  if grep -qi 'service name="https"' "$TARGETED_XML"; then
+    has_http=true
+    while read -r hp; do
+      [ -z "$hp" ] && continue
+      http_ports+=("$hp")
+    done < <(grep -i 'service name="https"' "$TARGETED_XML" \
+              | sed -E 's/.*portid="([0-9]+)".*/\1/')
+  fi
 
   # Try to spot FTP in XML as a fallback if PORTS wasn't populated
   if grep -qi 'service name="ftp"' "$TARGETED_XML"; then
@@ -105,6 +128,16 @@ fi
 dns_ports_str=""
 if [ "${#dns_ports[@]}" -gt 0 ]; then
   dns_ports_str="$(IFS=','; echo "${dns_ports[*]}")"
+fi
+
+# Join HTTP ports (if any) into a comma-separated, deduped string for display
+http_ports_str=""
+if [ "${#http_ports[@]}" -gt 0 ]; then
+  http_ports_str="$(
+    printf '%s\n' "${http_ports[@]}" \
+      | sort -nu \
+      | paste -sd',' -
+  )"
 fi
 
 # Join LDAP ports (if any) into a comma-separated string for ldap-master
@@ -128,11 +161,35 @@ ftp_watch_pid=""
 dns_watch_pid=""
 ldap_watch_pid=""
 
-echo -e "\n${yellow}[*]${end} ${purple}Launching service modules in parallel:${end}"
+echo -e "\n${yellow}[*]${end} ${cyan}Launching service modules in parallel:${end}"
+
+# --- FTP module (anonymous enum; runs parallel like SSH) ---
+if [ "$has_ftp" = true ] && [ -n "$ftp_port" ] && [ -x "$FTP_MASTER" ]; then
+  echo -e "${yellow}  [-]${end} ${purple}Starting FTP module on port(s):${end} ${blue}${ftp_port}${end}"
+  "$FTP_MASTER" "$OUTDIR" "$TARGET" "$ftp_port" >"$LOGDIR/ftp.log" 2>&1 &
+  ftp_pid=$!
+
+  (
+    while kill -0 "$ftp_pid" 2>/dev/null; do
+      sleep 0.3
+    done
+
+    if [ -s "$LOGDIR/ftp.log" ]; then
+      echo -e "\n${yellow}[*]${end} ${cyan}FTP module results:${end}"
+      cat "$LOGDIR/ftp.log"
+    fi
+  ) &
+  ftp_watch_pid=$!
+
+elif [ "$has_ftp" = true ] && [ -z "$ftp_port" ]; then
+  echo -e "${yellow}[!]${end} ${purple}FTP detected in XML but no port resolved; skipping ftp-master.${end}"
+elif [ "$has_ftp" = true ] && [ ! -x "$FTP_MASTER" ]; then
+  echo -e "${yellow}[!]${end} ${purple}FTP detected but ftp-master not found at${end} ${blue}$FTP_MASTER${end}"
+fi
 
 # --- SSH module (runs fully parallel, printed by a polling helper) ---
 if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
-  echo -e "${yellow}  [-]${end} ${purple}Starting SSH module...${end}"
+  echo -e "${yellow}  [-]${end} ${purple}Starting SSH module on port(s):${end} ${blue}22${end}"
   "$SSH_MASTER" "$OUTDIR" "$TARGET" "$TARGETED_XML" "$PORTS" >"$LOGDIR/ssh.log" 2>&1 &
   ssh_pid=$!
 
@@ -143,7 +200,7 @@ if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
     done
 
     if [ -s "$LOGDIR/ssh.log" ]; then
-      echo -e "\n${yellow}[*]${end} ${purple}SSH module results:${end}"
+      echo -e "\n${yellow}[*]${end} ${cyan}SSH module results:${end}"
       cat "$LOGDIR/ssh.log"
     fi
   ) &
@@ -151,30 +208,6 @@ if [ "$has_ssh" = true ] && [ -x "$SSH_MASTER" ]; then
 
 elif [ "$has_ssh" = true ] && [ ! -x "$SSH_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}SSH detected but ssh-master not found at${end} ${blue}$SSH_MASTER${end}"
-fi
-
-# --- FTP module (anonymous enum; runs parallel like SSH) ---
-if [ "$has_ftp" = true ] && [ -n "$ftp_port" ] && [ -x "$FTP_MASTER" ]; then
-  echo -e "${yellow}  [-]${end} ${purple}Starting FTP module on port $ftp_port...${end}"
-  "$FTP_MASTER" "$OUTDIR" "$TARGET" "$ftp_port" >"$LOGDIR/ftp.log" 2>&1 &
-  ftp_pid=$!
-
-  (
-    while kill -0 "$ftp_pid" 2>/dev/null; do
-      sleep 0.3
-    done
-
-    if [ -s "$LOGDIR/ftp.log" ]; then
-      echo -e "\n${yellow}[*]${end} ${purple}FTP module results:${end}"
-      cat "$LOGDIR/ftp.log"
-    fi
-  ) &
-  ftp_watch_pid=$!
-
-elif [ "$has_ftp" = true ] && [ -z "$ftp_port" ]; then
-  echo -e "${yellow}[!]${end} ${purple}FTP detected in XML but no port resolved; skipping ftp-master.${end}"
-elif [ "$has_ftp" = true ] && [ ! -x "$FTP_MASTER" ]; then
-  echo -e "${yellow}[!]${end} ${purple}FTP detected but ftp-master not found at${end} ${blue}$FTP_MASTER${end}"
 fi
 
 # --- DNS module (per-port DNS/AXFR/dnsenum; parallel like SSH/FTP) ---
@@ -189,7 +222,7 @@ if [ "$has_dns" = true ] && [ -x "$DNS_MASTER" ]; then
     done
 
     if [ -s "$LOGDIR/dns.log" ]; then
-      echo -e "\n${yellow}[*]${end} ${purple}DNS module results:${end}"
+      echo -e "\n${yellow}[*]${end} ${cyan}DNS module results:${end}"
       cat "$LOGDIR/dns.log"
     fi
   ) &
@@ -213,7 +246,7 @@ if [ "$has_ldap" = true ] && [ -x "$LDAP_MASTER" ]; then
     done
 
     if [ -s "$LOGDIR/ldap.log" ]; then
-      echo -e "\n${yellow}[*]${end} ${purple}LDAP module results:${end}"
+      echo -e "\n${yellow}[*]${end} ${cyan}LDAP module results:${end}"
       cat "$LOGDIR/ldap.log"
     fi
   ) &
@@ -225,13 +258,19 @@ fi
 
 # --- HTTP core module (detect/collect/enrich/add-hosts) ---
 if [ "$has_http" = true ] && [ -x "$HTTP_MASTER" ]; then
-  echo -e "${yellow}  [-]${end} ${purple}Starting HTTP module...${end}"
+  if [ -n "$http_ports_str" ]; then
+    echo -e "${yellow}  [-]${end} ${purple}Starting HTTP module on port(s):${end} ${blue}${http_ports_str}${end}"
+  else
+    # HTTP discovered but ports not resolved for banner (should be rare)
+    echo -e "${yellow}  [-]${end} ${purple}Starting HTTP module (ports from XML/auto-detection).${end}"
+  fi
   "$HTTP_MASTER" "$OUTDIR" "$TARGET" >"$LOGDIR/http.log" 2>&1 &
   http_pid=$!
 elif [ "$has_http" = true ] && [ ! -x "$HTTP_MASTER" ]; then
   echo -e "${yellow}[!]${end} ${purple}HTTP detected but http-master not found at${end} ${blue}$HTTP_MASTER${end}"
 fi
 
+# If literally nothing is queued, bail cleanly
 if [ -z "$ssh_pid" ] && [ -z "$http_pid" ] && [ -z "$ftp_pid" ] && [ -z "$dns_pid" ] && [ -z "$ldap_pid" ]; then
   echo -e "${yellow}  [!] No service modules to run.${end}"
   exit 0
@@ -241,13 +280,13 @@ fi
 if [ -n "$http_pid" ]; then
   wait "$http_pid" || true
   if [ -s "$LOGDIR/http.log" ]; then
-    echo -e "\n${yellow}[*]${end} ${purple}HTTP module results:${end}"
+    echo -e "\n${yellow}[*]${end} ${cyan}HTTP module results:${end}"
     cat "$LOGDIR/http.log"
   fi
 
   # Now that http-master is done, verified-ports.txt exists if there are HTTP ports.
   if [ "$has_http" = true ] && [ -x "$HTTP_CMS_MASTER" ]; then
-    echo -e "\n${yellow}[*]${end} ${purple}Starting HTTP CMS detection module.${end}"
+    echo -e "\n${yellow}[*]${end} ${cyan}Starting HTTP CMS detection module.${end}"
     "$HTTP_CMS_MASTER" "$OUTDIR" "$TARGET" >"$LOGDIR/http-cms.log" 2>&1 &
     http_cms_pid=$!
   fi
@@ -257,7 +296,7 @@ fi
 if [ -n "$http_cms_pid" ]; then
   wait "$http_cms_pid" || true
   if [ -s "$LOGDIR/http-cms.log" ]; then
-    echo -e "\n${yellow}[*]${end} ${purple}HTTP-CMS module results:${end}"
+    echo -e "\n${yellow}[*]${end} ${cyan}HTTP-CMS module results:${end}"
     cat "$LOGDIR/http-cms.log"
   fi
 fi
