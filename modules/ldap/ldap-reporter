@@ -44,6 +44,34 @@ make_link_if() {
   printf '<a href="../%s">%s</a>' "$relpath" "$label"
 }
 
+# Extract a section from summary.txt, e.g. "[ Interesting Users ]"
+extract_section() {
+  local file="$1" header="$2"
+  [ -s "$file" ] || return 0
+  awk -v H="$header" '
+    $0 == H { insec=1; next }
+    /^\[.*\]/ && insec { exit }
+    insec { print }
+  ' "$file"
+}
+
+# Join arguments with ", "
+join_csv() {
+  local joined=""
+  local first=1
+  local x
+  for x in "$@"; do
+    [ -n "$x" ] || continue
+    if [ $first -eq 1 ]; then
+      joined="$x"
+      first=0
+    else
+      joined="$joined, $x"
+    fi
+  done
+  printf '%s' "$joined"
+}
+
 # --- collect LDAP ports under OUTDIR/ldap/* ---
 
 ports=()
@@ -72,34 +100,92 @@ esc_domain="$(printf '%s' "$DomainDN" | html_escape)"
 esc_forest="$(printf '%s' "$ForestDN" | html_escape)"
 esc_isad="$(printf '%s' "$IsAD" | html_escape)"
 
+# --- Interesting users (from primary summary) ---
+
+interesting_block=""
+if [ -s "$primary_summary" ]; then
+  interesting_block="$(extract_section "$primary_summary" "[ Interesting Users ]" 2>/dev/null || true)"
+fi
+
+have_interesting=""
+interesting_names_str=""
+
+if [ -n "$interesting_block" ] && ! printf '%s\n' "$interesting_block" | grep -qi '(none detected)'; then
+  # Strip leading/trailing whitespace, drop blanks, join as csv
+  interesting_names_str="$(
+    printf '%s\n' "$interesting_block" \
+      | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+      | sed '/^$/d' \
+      | paste -sd',' - \
+      | sed 's/,/, /g'
+  )"
+  if [ -n "$interesting_names_str" ]; then
+    have_interesting="yes"
+  fi
+fi
+
+# --- Pre-scan ports for Anonymous Bind summary ---
+
+anon_yes_ports=()
+
+for port in "${ports[@]}"; do
+  summary="$LDAPDIR/$port/summary.txt"
+  [ -s "$summary" ] || continue
+
+  anon_bind="$(grep -im1 '^Anonymous bind:' "$summary" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')"
+  [ -z "$anon_bind" ] && anon_bind="unknown"
+
+  anon_lower="$(printf '%s' "$anon_bind" | tr 'A-Z' 'a-z')"
+  case "$anon_lower" in
+    yes|true)
+      anon_yes_ports+=("$port")
+      ;;
+  esac
+done
+
+anon_yes_str="$(join_csv "${anon_yes_ports[@]}")"
+
 # --- emit fragment HTML ---
 
 {
   echo '<h3>LDAP Summary</h3>'
   echo '<div class="lantern-port">'
   echo '  <h4>Directory Overview</h4>'
-  echo '  <div class="lantern-meta">'
 
-  # Domain / Forest / AD on one line if present
+  # Top-level directory line (domain / forest / AD)
+  echo '  <div class="lantern-meta lantern-meta-inline">'
   if [ -n "$esc_domain" ]; then
-    printf '    <strong>Domain DN:</strong> %s' "$esc_domain"
+    printf '    <span><strong>Domain DN:</strong> %s</span>' "$esc_domain"
   fi
   if [ -n "$esc_forest" ]; then
-    if [ -n "$esc_domain" ]; then
-      printf ' &nbsp;•&nbsp; '
-    fi
-    printf '<strong>Forest DN:</strong> %s' "$esc_forest"
+    printf '    <span><strong>Forest DN:</strong> %s</span>' "$esc_forest"
   fi
   if [ -n "$esc_isad" ]; then
-    if [ -n "$esc_domain$esc_forest" ]; then
-      printf ' &nbsp;•&nbsp; '
-    fi
-    printf '<strong>Active Directory:</strong> %s' "$esc_isad"
+    printf '    <span><strong>Active Directory:</strong> %s</span>' "$esc_isad"
   fi
   echo
   echo '  </div>'
 
-  # --------- Preview block from primary port (summary + users) ---------
+  # --- High-value quick summary: interesting accounts + anon bind ports ---
+  echo '  <div class="lantern-meta lantern-meta-inline">'
+  if [ "$have_interesting" = "yes" ]; then
+    printf '    <span><strong>Interesting accounts:</strong> <span class="lantern-bad">%s</span></span>' \
+      "$(html_escape <<< "$interesting_names_str")"
+  else
+    echo '    <span><strong>Interesting accounts:</strong> none flagged</span>'
+  fi
+
+  if [ -n "$anon_yes_str" ]; then
+    printf '    <span><strong>Anon bind enabled (ports):</strong> <span class="lantern-bad">%s</span></span>' \
+      "$(html_escape <<< "$anon_yes_str")"
+  else
+    echo '    <span><strong>Anon bind:</strong> <span class="lantern-good">none (good)</span></span>'
+  fi
+
+  echo
+  echo '  </div>'
+
+  # --------- Scrollable preview (summary + users) ---------
   pdir="$LDAPDIR/$primary_port"
   primary_users="$pdir/users.txt"
 
@@ -120,8 +206,8 @@ esc_isad="$(printf '%s' "$IsAD" | html_escape)"
     echo '  </pre></details>'
   fi
 
-  # --------- Per-port status + artifact links (moved AFTER preview) ---------
-  echo '  <div class="lantern-meta"><strong>Per-port status:</strong></div>'
+  # --------- Per-port status + artifact links (BOTTOM) ---------
+  echo '  <h4 style="margin-top:.75rem;">Per-port status & artifacts</h4>'
 
   for port in "${ports[@]}"; do
     portdir="$LDAPDIR/$port"
@@ -137,21 +223,33 @@ esc_isad="$(printf '%s' "$IsAD" | html_escape)"
 
     esc_anon="$(printf '%s' "$anon_bind" | html_escape)"
 
+    # choose CSS class based on value (global good/bad)
+    anon_lower="$(printf '%s' "$anon_bind" | tr 'A-Z' 'a-z')"
+    anon_class=""
+    case "$anon_lower" in
+      yes|true)
+        anon_class=' class="lantern-bad"'
+        ;;
+      no|false)
+        anon_class=' class="lantern-good"'
+        ;;
+    esac
+
     # Per-port artifacts
     link_items=()
-    link_items+=("$(make_link_if 'summary.txt'          "ldap/$port/summary.txt")")
-    link_items+=("$(make_link_if 'rootdse.txt'          "ldap/$port/rootdse.txt" allow_empty)")
-    link_items+=("$(make_link_if 'basedn.txt'           "ldap/$port/basedn.txt" allow_empty)")
-    link_items+=("$(make_link_if 'domain.txt'           "ldap/$port/domain.txt" allow_empty)")
-    link_items+=("$(make_link_if 'users.txt'            "ldap/$port/users.txt" allow_empty)")
-    link_items+=("$(make_link_if 'groups.txt'           "ldap/$port/groups.txt" allow_empty)")
-    link_items+=("$(make_link_if 'computers.txt'        "ldap/$port/computers.txt" allow_empty)")
-    link_items+=("$(make_link_if 'spn-accounts.txt'     "ldap/$port/spn-accounts.txt" allow_empty)")
-    link_items+=("$(make_link_if 'interesting.txt'      "ldap/$port/interesting.txt" allow_empty)")
-    link_items+=("$(make_link_if 'users-classified.txt' "ldap/$port/users-classified.txt" allow_empty)")
-    link_items+=("$(make_link_if 'groups-priv.txt'      "ldap/$port/groups-priv.txt" allow_empty)")
-    link_items+=("$(make_link_if 'all-objects.txt'      "ldap/$port/all-objects.txt" allow_empty)")
-    link_items+=("$(make_link_if 'extra-accounts.txt'   "ldap/$port/extra-accounts.txt" allow_empty)")
+    link_items+=("$(make_link_if "summary.txt"          "ldap/$port/summary.txt")")
+    link_items+=("$(make_link_if "rootdse.txt"          "ldap/$port/rootdse.txt"        allow_empty)")
+    link_items+=("$(make_link_if "basedn.txt"           "ldap/$port/basedn.txt"         allow_empty)")
+    link_items+=("$(make_link_if "domain.txt"           "ldap/$port/domain.txt"         allow_empty)")
+    link_items+=("$(make_link_if "users.txt"            "ldap/$port/users.txt"          allow_empty)")
+    link_items+=("$(make_link_if "groups.txt"           "ldap/$port/groups.txt"         allow_empty)")
+    link_items+=("$(make_link_if "computers.txt"        "ldap/$port/computers.txt"      allow_empty)")
+    link_items+=("$(make_link_if "spn-accounts.txt"     "ldap/$port/spn-accounts.txt"   allow_empty)")
+    link_items+=("$(make_link_if "interesting.txt"      "ldap/$port/interesting.txt"    allow_empty)")
+    link_items+=("$(make_link_if "users-classified.txt" "ldap/$port/users-classified.txt" allow_empty)")
+    link_items+=("$(make_link_if "groups-priv.txt"      "ldap/$port/groups-priv.txt"    allow_empty)")
+    link_items+=("$(make_link_if "all-objects.txt"      "ldap/$port/all-objects.txt"    allow_empty)")
+    link_items+=("$(make_link_if "extra-accounts.txt"   "ldap/$port/extra-accounts.txt" allow_empty)")
 
     # Any extra LDAP artifacts not in the known list
     shopt -s nullglob
@@ -171,7 +269,7 @@ esc_isad="$(printf '%s' "$IsAD" | html_escape)"
     links="$(emit_links "${link_items[@]}")"
 
     echo '  <div class="lantern-meta">'
-    printf '    <strong>Port <code>%s</code>:</strong> Anonymous bind: %s' "$port" "$esc_anon"
+    printf '    <strong>Port <code>%s</code>:</strong> Anonymous bind: <span%s>%s</span>' "$port" "$anon_class" "$esc_anon"
     if [ -n "$links" ]; then
       printf '<br>'
       printf ' &nbsp;•&nbsp; <strong>Artifacts:</strong> %s' "$links"

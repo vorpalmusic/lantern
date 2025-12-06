@@ -148,9 +148,9 @@ build_ssh_fragment() {
 
     echo "  <div class=\"lantern-files\">${links:-<em>No SSH artifacts present.</em>}</div>" >> "$frag"
 
-    # Collapsed ssh-audit preview (two-column, minimized by default)
+    # SSH preview: single-column, scrollable, hard-wrapped (special CSS class)
     if [ -s "$portdir/ssh-audit.txt" ]; then
-      echo "  <details style=\"margin-top:.4rem\"><summary>View full SSH analysis (ssh-audit)</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
+      echo "  <details style=\"margin-top:.4rem\"><summary>View full SSH analysis (ssh-audit)</summary><pre class=\"lantern-pre-ssh\">" >> "$frag"
       sed -n '1,400p' "$portdir/ssh-audit.txt" | html_escape >> "$frag"
       echo "  </pre></details>" >> "$frag"
     fi
@@ -234,14 +234,14 @@ build_ftp_fragment() {
       echo "  <div class=\"lantern-files\">${links:-<em>No FTP artifacts.</em>}</div>"
     } >> "$frag"
 
-    # Inline SUMMARY preview (nice two-column block, open by default)
+    # Inline SUMMARY preview (two-column, scrollable)
     if [ -s "$portdir/summary.txt" ]; then
       echo "  <details open style=\"margin-top:.4rem\"><summary>FTP Summary Preview</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
       sed -n '1,300p' "$portdir/summary.txt" | html_escape >> "$frag"
       echo "  </pre></details>" >> "$frag"
     fi
 
-    # Inline LISTING preview (open by default)
+    # Inline LISTING preview (two-column, scrollable)
     if [ -s "$portdir/listing.txt" ]; then
       echo "  <details open style=\"margin-top:.4rem\"><summary>Directory Listing Preview</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
       sed -n '1,300p' "$portdir/listing.txt" | html_escape >> "$frag"
@@ -308,7 +308,7 @@ build_dns_fragment() {
       echo "  <div class=\"lantern-files\">${links:-<em>No DNS artifacts.</em>}</div>"
     } >> "$frag"
 
-    # Inline DNS summary preview (two-column, open by default)
+    # Inline DNS summary preview
     if [ -s "$portdir/summary.txt" ]; then
       echo "  <details open style=\"margin-top:.4rem\"><summary>DNS Summary Preview</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
       sed -n '1,300p' "$portdir/summary.txt" | html_escape >> "$frag"
@@ -331,7 +331,7 @@ build_http_fragment() {
     return
   fi
 
-  # ports as basenames, sorted numerically
+  # ports as baselines, sorted numerically
   local ports=()
   mapfile -t ports < <(find "$OUTDIR/http" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n)
 
@@ -402,7 +402,7 @@ build_http_fragment() {
   </div>
 PORT
 
-    # Inline WhatWeb output in two-column block (if present)
+    # Inline WhatWeb output in two-column block (scrollable)
     if [ -s "$portdir/whatweb.txt" ]; then
       {
         echo '  <details open style="margin-top:.4rem">'
@@ -478,7 +478,7 @@ build_cms_fragment() {
         echo "  <div class=\"lantern-files\"><strong>Joomla:</strong> $(emit_links "${links_j[@]}")</div>" >> "$frag"
       fi
 
-      # Inline JoomScan output in same two-column style (strip ANSI here just in case)
+      # Inline JoomScan output in same two-column style
       if [ -s "$OUTDIR/$jdir/joomscan.txt" ]; then
         echo "  <details open style=\"margin-top:.4rem\"><summary>View Joomla scan details (JoomScan)</summary><pre class=\"lantern-pre-twocol\">" >> "$frag"
         sed -n '1,400p' "$OUTDIR/$jdir/joomscan.txt" \
@@ -502,9 +502,9 @@ build_ftp_fragment
 build_dns_fragment
 
 # LDAP fragment via module helper
-if [ -x "$rootdir/modules/ldap/ldap-reporter" ]; then
+if [ -f "$rootdir/modules/ldap/ldap-reporter" ]; then
   ldap_frag="$FRAGDIR/09-ldap.html"
-  "$rootdir/modules/ldap/ldap-reporter" "$OUTDIR" > "$ldap_frag" 2>/dev/null || true
+  bash "$rootdir/modules/ldap/ldap-reporter" "$OUTDIR" > "$ldap_frag" 2>/dev/null || true
   # If helper produced nothing, remove the empty file so it doesn't spawn an empty section.
   [ -s "$ldap_frag" ] || rm -f "$ldap_frag"
 fi

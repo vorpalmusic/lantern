@@ -1,7 +1,3 @@
-#!/usr/bin/env bash
-# report-style — emit shared CSS + opening container for Lantern HTML report
-
-cat <<'HEAD'
 <style>
 #lantern-report{
   font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans","Liberation Sans",sans-serif;
@@ -19,10 +15,19 @@ cat <<'HEAD'
   margin:10px 0;
   max-width:100%;
   overflow-wrap:break-word;
+  overflow-x:hidden; /* safety belt */
 }
 #lantern-report .lantern-meta{color:#555;font-size:.9rem;margin-bottom:.4rem}
 #lantern-report code{background:#f6f8fa;padding:0 .3rem;border-radius:6px}
 #lantern-report .lantern-files a{text-decoration:none}
+
+/* Compact, multi-column meta rows for high-value summaries */
+#lantern-report .lantern-meta-inline span{
+  display:inline-block;
+  margin-right:1.5rem;
+  margin-bottom:0.15rem;
+  min-width:12rem; /* gives a pseudo-column feel, wraps as needed */
+}
 
 /* Notable SSH block */
 #lantern-report .lantern-ssh-notable{
@@ -35,25 +40,63 @@ cat <<'HEAD'
   background:#fef2f2;
   border-radius:4px;
   font-size:.8rem;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
 }
 
-/* Shared two-column tool output */
+/* Shared two-column tool output for spammy modules (FTP/HTTP/CMS/DNS) */
 #lantern-report pre.lantern-pre-twocol{
-  /* No internal scrollbars; wrap long tokens */
-  max-height:none;
-  overflow:visible;
   background:#020617;
   color:#e5e7eb;
   padding:.5rem .75rem;
   border-radius:6px;
   font-size:.8rem;
+
+  /* Two-column layout */
   column-count:2;
   column-gap:1.5rem;
+
+  /* Scroll INSIDE the details block */
+  max-height:400px;
+  overflow:auto;      /* vertical + horizontal scroll if needed */
   white-space:pre-wrap;
   overflow-wrap:anywhere;
   word-break:break-word;
 }
+
+#lantern-report pre.lantern-pre-monoline{
+  max-height:260px;
+  overflow:auto;
+  background:#020617;
+  color:#e5e7eb;
+  padding:.5rem .75rem;
+  border-radius:6px;
+  font-size:.8rem;
+  white-space:pre;
+}
+
+/* SSH-specific: single-column, scrollable, hard-wrapped */
+#lantern-report pre.lantern-pre-ssh{
+  background:#020617;
+  color:#e5e7eb;
+  padding:.5rem .75rem;
+  border-radius:6px;
+  font-size:.8rem;
+
+  max-height:400px;
+  overflow:auto;      /* scroll inside SSH block */
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-all;  /* extremely aggressive: break in the middle of long tokens */
+}
+#lantern-report .lantern-bad{
+  color:#b91c1c;
+  font-weight:700;
+}
+#lantern-report .lantern-good{
+  color:#166534;
+  font-weight:600;
+}
 </style>
 <section id="lantern-report">
   <h2>Lantern Modules</h2>
-HEAD

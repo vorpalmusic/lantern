@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# ldap-classify — classify LDAP users and update "Interesting Users" in summary
+# Usage:
+#   ldap-classify OUTDIR PORT
+#
+# Expects:
+#   OUTDIR/ldap/<PORT>/users.txt
+#   OUTDIR/ldap/<PORT>/summary.txt
+# Produces:
+#   OUTDIR/ldap/<PORT>/interesting.txt
+#   summary.txt with updated [ Interesting Users ] block
+
+set -euo pipefail
+
+OUTDIR="${1:-}"
+PORT="${2:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$PORT" ]; then
+  echo "[!] ldap-classify: Usage: ldap-classify OUTDIR PORT" >&2
+  exit 2
+fi
+
+PORTDIR="$OUTDIR/ldap/$PORT"
+USERS="$PORTDIR/users.txt"
+SUMMARY="$PORTDIR/summary.txt"
+
+[ -s "$USERS" ] || exit 0
+[ -s "$SUMMARY" ] || exit 0
+
+INTERESTING="$PORTDIR/interesting.txt"
+: > "$INTERESTING"
+
+# --- pass 1: build interesting.txt (one sAMAccountName per line) ---
+
+awk '
+  /^dn:[[:space:]]/ {
+    dn=$0
+  }
+  /^sAMAccountName:[[:space:]]*/ {
+    split($0,a,":")
+    sam=gensub(/^[[:space:]]+/, "", "g", a[2])
+  }
+  /^memberOf:[[:space:]]*/ {
+    if (memberof != "") memberof = memberof "\n" $0
+    else memberof = $0
+  }
+  /^$/ {
+    process_entry()
+    dn=""; sam=""; memberof=""
+  }
+  END {
+    process_entry()
+  }
+  function process_entry(   lower_dn, lower_sam, lower_mem, is_interesting) {
+    if (sam == "") return
+
+    lower_dn = tolower(dn)
+    lower_sam = tolower(sam)
+    lower_mem = tolower(memberof)
+
+    is_interesting = 0
+
+    # OU-based
+    if (lower_dn ~ /ou=it/ || lower_dn ~ /ou=admin/ || lower_dn ~ /ou=admins/ || lower_dn ~ /ou=security/) {
+      is_interesting = 1
+    }
+
+    # service-style names
+    if (lower_sam ~ /^(svc-|sql-|backup-|web-|app-|azure-)/) {
+      is_interesting = 1
+    }
+
+    # admin-ish groups
+    if (lower_mem ~ /cn=.*admin/) {
+      is_interesting = 1
+    }
+
+    if (is_interesting) {
+      print sam
+    }
+  }
+' "$USERS" | sort -u > "$INTERESTING"
+
+# --- pass 2: update [ Interesting Users ] block in summary.txt ---
+
+tmp="$(mktemp)"
+interesting_nonempty=0
+if [ -s "$INTERESTING" ]; then
+  interesting_nonempty=1
+fi
+
+awk -v intfile="$INTERESTING" -v have_int="$interesting_nonempty" '
+  BEGIN { in_int=0 }
+  # entering [ Interesting Users ] section
+  $0 == "[ Interesting Users ]" {
+    print $0
+    in_int=1
+    if (have_int == 1) {
+      while ((getline l < intfile) > 0) {
+        # indent two spaces to match existing style
+        print "  " l
+      }
+      close(intfile)
+    } else {
+      print "  (none detected)"
+    }
+    next
+  }
+
+  # while inside [ Interesting Users ], skip old lines until next header
+  in_int && /^\[/ {
+    in_int=0
+    # fall through to normal printing of this header line
+  }
+  in_int {
+    next
+  }
+
+  { print $0 }
+' "$SUMMARY" > "$tmp" && mv "$tmp" "$SUMMARY"

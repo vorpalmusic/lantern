@@ -571,6 +571,11 @@ fi
     echo
   } >>"$SUMMARY_FILE"
 
+  # --- OPTIONAL: extra classification helper (only writes artifacts, no summary edit) ---
+  if [ -x "$ROOTDIR/modules/ldap/ldap-classify" ]; then
+    "$ROOTDIR/modules/ldap/ldap-classify" "$OUTDIR" "$PORT" || true
+  fi
+
   # --- fire ldap-treasure for this port ---
   if [ -x "$ROOTDIR/modules/ldap/ldap-treasure" ]; then
     "$ROOTDIR/modules/ldap/ldap-treasure" "$OUTDIR" "$PORT" 2>/dev/null || \
