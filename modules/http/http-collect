@@ -128,6 +128,13 @@ fi
 # 8) whatweb fingerprint (if installed) — robust, never fatal, always leaves whatweb.txt
 : > "$DEST/whatweb.txt"
 
+# Heuristic scheme: assume HTTPS on "usual" TLS ports, else HTTP
+SCHEME="http"
+case "$PORT" in
+  443|8443|9443|10443) SCHEME="https" ;;
+esac
+WHATWEB_URL="$SCHEME://$IP:$PORT/"
+
 if command -v whatweb >/dev/null 2>&1; then
   WHATWEB_MAX_THREADS="${WHATWEB_MAX_THREADS:-8}"
   WHATWEB_OPEN_TIMEOUT="${WHATWEB_OPEN_TIMEOUT:-6}"
@@ -135,30 +142,35 @@ if command -v whatweb >/dev/null 2>&1; then
   WHATWEB_TIMEOUT="${WHATWEB_TIMEOUT:-10}"       # hard cap on runtime (seconds)
   WHATWEB_AGGRESSION="${WHATWEB_AGGRESSION:-1}"  # 1 = conservative
 
+  {
+    echo "# whatweb against $WHATWEB_URL"
+    echo "# started: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  } >> "$DEST/whatweb.txt"
+
   if command -v timeout >/dev/null 2>&1; then
     if ! timeout "$WHATWEB_TIMEOUT" \
-        whatweb \
-          --max-threads="$WHATWEB_MAX_THREADS" \
-          --open-timeout="$WHATWEB_OPEN_TIMEOUT" \
-          --read-timeout="$WHATWEB_READ_TIMEOUT" \
-          --aggression="$WHATWEB_AGGRESSION" \
-          --follow-redirect=never \
-          --color=never \
-          -v \
-          "http://$IP:$PORT/" >> "$DEST/whatweb.txt" 2>&1; then
-      echo "whatweb: timeout or error (non-fatal)" >> "$DEST/whatweb.txt"
+          whatweb \
+            -v \
+            -a "$WHATWEB_AGGRESSION" \
+            --max-threads="$WHATWEB_MAX_THREADS" \
+            --open-timeout="$WHATWEB_OPEN_TIMEOUT" \
+            --read-timeout="$WHATWEB_READ_TIMEOUT" \
+            --color=never \
+            "$WHATWEB_URL" >> "$DEST/whatweb.txt" 2>&1; then
+      status=$?
+      echo "# whatweb: non-zero exit ($status) (timeout or error; non-fatal)" >> "$DEST/whatweb.txt"
     fi
   else
     if ! whatweb \
+          -v \
+          -a "$WHATWEB_AGGRESSION" \
           --max-threads="$WHATWEB_MAX_THREADS" \
           --open-timeout="$WHATWEB_OPEN_TIMEOUT" \
           --read-timeout="$WHATWEB_READ_TIMEOUT" \
-          --aggression="$WHATWEB_AGGRESSION" \
-          --follow-redirect=never \
           --color=never \
-          -v \
-          "http://$IP:$PORT/" >> "$DEST/whatweb.txt" 2>&1; then
-      echo "whatweb: error (non-fatal)" >> "$DEST/whatweb.txt"
+          "$WHATWEB_URL" >> "$DEST/whatweb.txt" 2>&1; then
+      status=$?
+      echo "# whatweb: non-zero exit ($status) (error; non-fatal)" >> "$DEST/whatweb.txt"
     fi
   fi
 else
