@@ -382,7 +382,7 @@ if [[ "$MODE" == "all" || "$MODE" == "http" ]]; then
 
         lc_dom="${dom,,}"
         if [[ -n "${host_ips[$lc_dom]+x}" ]]; then
-          [ "$VERBOSE" -eq 1 ] && echo "[skip] $dom (already accepted earlier)" >&2
+          [ "$VERBOSE" -eq 1 ] && echo -e " ${yellow} [!] $dom (already accepted earlier)${end}" >&2
           continue
         fi
 
@@ -437,7 +437,7 @@ for lc in "${!host_ips[@]}"; do
 
   if upsert_host_entry "$ip" "$name"; then
     if [ "${DRY_RUN:-0}" -eq 0 ]; then
-      echo -e "${yellow}  [-]${end} ${purple}Ensured:${end} ${blue}${name} → ${ip}${end}"
+      echo -e "${yellow}  [+]${end} ${purple}Ensured:${end} ${blue}${name} → ${ip}${end}"
     fi
   else
     echo -e "${red}ERROR: failed to upsert '${name}' into /etc/hosts (sudo?)${end}" >&2
@@ -449,7 +449,7 @@ done
 if [ "$NEW_HOSTS_ADDED" -gt 0 ]; then
   echo -e "${yellow}[*] [add-hosts]:${end} ${green}Updated /etc/hosts with ${NEW_HOSTS_ADDED} entr(ies).${end}"
 else
-  echo -e "${yellow}[*] [add-hosts]: /etc/hosts already up-to-date for discovered hostnames.${end}"
+  echo -e "${yellow}  [!] [add-hosts]: /etc/hosts already up-to-date for discovered hostnames.${end}"
 fi
 
 exit 0

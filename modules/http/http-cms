@@ -54,7 +54,7 @@ for p in $ports; do
 done
 
 if [ "$cms_found" -eq 0 ]; then
-  echo -e "${yellow}[!] No CMS detected on any verified HTTP ports.${end}"
+  echo -e "${yellow}  [!] No CMS detected on any verified HTTP ports.${end}"
 fi
 
 

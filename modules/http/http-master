@@ -14,9 +14,13 @@ HMOD="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null
 ROOTDIR="$(cd "$HMOD/../.." >/dev/null 2>&1 && pwd)"
 MODDIR="$ROOTDIR/modules"
 LISTDIR="$ROOTDIR/lists"
+CONFIG="$ROOTDIR/.config"
 
 # Colors
 . "$ROOTDIR/lib/colors"
+
+# Load config if present (for things like katanapath)
+[ -f "$CONFIG" ] && . "$CONFIG"
 
 # Duplicate stderr onto fd 3 for "live" console output that bypasses dispatch logging
 exec 3>&2
@@ -27,8 +31,17 @@ mkdir -p "$OUTDIR/http"
 eval "$("$MODDIR/http/http-detect" "$OUTDIR" "$TARGET")"
 
 # Print *immediately* on fd 3 so they are not captured in http.log
-echo -e "${yellow}[*]${end} ${purple}HTTP candidates:${end} ${blue}${HTTP_CAND:-<none>}${end}" >&3
-echo -e "${yellow}[*]${end} ${purple}Verified HTTP ports:${end} ${blue}${HTTP_VERIFIED:-<none>}${end}" >&3
+echo -e "${yellow}  [-]${end} ${purple}HTTP candidates:${end} ${blue}${HTTP_CAND:-<none>}${end}" >&3
+echo -e "${yellow}  [-]${end} ${purple}Verified HTTP ports:${end} ${blue}${HTTP_VERIFIED:-<none>}${end}" >&3
+
+# --- Optional spidering with katana (separate module) ---
+if [ -n "${HTTP_VERIFIED:-}" ]; then
+  "$MODDIR/http/http-katana" \
+    "$OUTDIR" \
+    "$TARGET" \
+    "${HTTP_VERIFIED:-}" \
+    || true
+fi
 
 # Persist verified ports for downstream modules (e.g. http-cms)
 VERIFIED_FILE="$OUTDIR/http/verified-ports.txt"
@@ -73,7 +86,7 @@ fi
 if [ -n "${HTTP_VERIFIED:-}" ]; then
   raw_names="$("$MODDIR/http/http-names" "$OUTDIR" 2>/dev/null || true)"
 
-  echo -e "${yellow}[*]${end} ${purple}Candidate person names from web pages${end} ${yellow}(Add garbage, e.g. About Us, to lists/deny-names)${end}${yellow}:${end}"
+  echo -e "${yellow}  [+]${end} ${purple}Candidate person names from web pages${end} ${yellow}(Add garbage, e.g. About Us, to lists/deny-names)${end}${yellow}:${end}"
 
   if [ -n "$raw_names" ]; then
     # Apply deny-names filter HERE (not inside http-names)
@@ -89,19 +102,19 @@ if [ -n "${HTTP_VERIFIED:-}" ]; then
         echo -e "   ${blue}${n}${end}"
       done <<< "$filtered_names"
     else
-      echo -e "  ${yellow}[!] No probable names found in the web pages.${end}"
+      echo -e "  ${yellow}  [!] No probable names found in the web pages.${end}"
     fi
   else
-    echo -e "  ${yellow}[!] No probable names found in the web pages.${end}"
+    echo -e "  ${yellow}  [!] No probable names found in the web pages.${end}"
   fi
 fi
 
 # --- Domains enrichment ---
 # Use the actual target (IP/hostname) as the seed; http/enrich reads all HTTP artifacts
-# under \$OUTDIR/http and aggregates hostnames. We don't care if it exits non-zero.
+# under $OUTDIR/http and aggregates hostnames. We don't care if it exits non-zero.
 found_hosts="$("$MODDIR/http/enrich" "$OUTDIR" "$TARGET" --max 200 || true)"
 
-echo -e "${yellow}[*]${end} ${purple}Domains found in the web pages:${end}"
+echo -e "${yellow}  [+]${end} ${purple}Domains found in the web pages:${end}"
 if [ -n "$found_hosts" ]; then
   printf '%s\n' "$found_hosts" \
     | sed '/^$/d' \

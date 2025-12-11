@@ -6,3 +6,4 @@ LIBDIR="$(cd -- "$ROOTDIR/lib" && pwd -P)"
 MODDIR="$(cd -- "$ROOTDIR/modules" && pwd -P)"
 LISTDIR="$(cd -- "$ROOTDIR/lists" && pwd -P)"
 SCRIPTDIR="$(cd -- "$ROOTDIR/scripts" && pwd -P)"
+BINDIR="$ROOTDIR/bin" ## may not exist, but will get created if bootstrap downloads additional tools

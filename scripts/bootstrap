@@ -5,6 +5,7 @@ set -euo pipefail
 # Resolve project root (bootstrap is in $ROOTDIR/scripts)
 ROOTDIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
 CONFIG="$ROOTDIR/.config"
+BINDIR="$ROOTDIR/bin"
 
 # Colors
 . "$ROOTDIR/lib/colors"
@@ -17,6 +18,7 @@ CONFIG="$ROOTDIR/.config"
 # init=0  -> initial setup already handled
 init="${init:-1}"
 depcheck="${depcheck:-0}"
+katanapath="${katanapath:-}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -36,6 +38,90 @@ set_kv() {
   fi
 }
 
+# Prefer katanapath -> $ROOTDIR/bin/katana -> ~/go/bin/katana -> PATH
+find_katana() {
+  local found=""
+  if [ -n "$katanapath" ] && [ -x "$katanapath" ]; then
+    found="$katanapath"
+  elif [ -x "$BINDIR/katana" ]; then
+    found="$BINDIR/katana"
+  elif [ -x "$HOME/go/bin/katana" ]; then
+    found="$HOME/go/bin/katana"
+  elif command -v katana >/dev/null 2>&1; then
+    found="$(command -v katana)"
+  fi
+  [ -n "$found" ] && echo "$found"
+}
+
+# Optional katana setup (never fatal)
+check_katana_optional() {
+  # If config already has a working path, we're done
+  if [ -n "$katanapath" ] && [ -x "$katanapath" ]; then
+    echo -e "${yellow}[*]${end} ${purple}katana found (from config):${end} ${blue}${katanapath}${end}"
+    return 0
+  fi
+
+  # Auto-detect existing binary
+  local detected
+  detected="$(find_katana 2>/dev/null || true)"
+  if [ -n "$detected" ]; then
+    echo -e "${yellow}[*]${end} ${purple}katana detected at:${end} ${blue}${detected}${end}"
+    katanapath="$detected"
+    set_kv katanapath "$katanapath"
+    return 0
+  fi
+
+  # Not found: offer installation (optional)
+  echo
+  echo -e "${yellow}[*]${end} ${purple}Optional spider tool${end} ${blue}katana${end} ${purple}is not installed.${end}"
+  read -r -p "$(echo -e "${yellow}Install katana now via go? [y/N]: ${end}")" ans
+  case "$ans" in
+    y|Y|yes|YES)
+      # Ensure go exists (non-fatal)
+      if ! command -v go >/dev/null 2>&1; then
+        echo -e "${yellow}[*]${end} ${purple}Go compiler not found. Installing${end} ${blue}golang-go${end}${purple}...${end}"
+        if command -v apt-get >/dev/null 2>&1; then
+          if ! sudo apt-get update || ! sudo apt-get install -y golang-go; then
+            echo -e "${red}[!] Failed to install golang-go. Skipping katana install (optional).${end}"
+            return 0
+          fi
+        else
+          echo -e "${red}[!] No apt-get available. Skipping katana install (optional).${end}"
+          return 0
+        fi
+      fi
+
+      echo -e "${yellow}[*]${end} ${purple}Installing katana with go...${end}"
+      mkdir -p "$BINDIR"
+      export CGO_ENABLED=1
+      if ! go install github.com/projectdiscovery/katana/cmd/katana@latest; then
+        echo -e "${red}[!] go install katana failed. Ignoring (optional tool).${end}"
+        return 0
+      fi
+
+      # Prefer copying into Lantern's bin if built under GOPATH
+      if [ -x "$HOME/go/bin/katana" ]; then
+        cp "$HOME/go/bin/katana" "$BINDIR/katana"
+        chmod +x "$BINDIR/katana"
+      fi
+
+      detected="$(find_katana 2>/dev/null || true)"
+      if [ -n "$detected" ]; then
+        echo -e "${green}[+]${end} ${purple}katana installed at:${end} ${blue}${detected}${end}"
+        katanapath="$detected"
+        set_kv katanapath "$katanapath"
+      else
+        echo -e "${red}[!] katana still not found after install attempt (optional, continuing).${end}"
+      fi
+      ;;
+    *)
+      echo -e "${yellow}[*]${end} ${purple}Skipping katana installation (optional).${end}"
+      ;;
+  esac
+
+  return 0
+}
+
 CORE_CMDS=(
   nmap
   curl
@@ -50,7 +136,6 @@ CORE_CMDS=(
   lsof
   fuser
   lftp
-  python3-impacket
 )
 
 OPTIONAL_CMDS=(
@@ -118,6 +203,19 @@ for cmd in "${CORE_CMDS[@]}"; do
   fi
 done
 
+# Special-case impacket: check as a python3 module, not a command
+impacket_entry=""
+impacket_pkg="python3-impacket"
+if python3 - <<'EOF' >/dev/null 2>&1
+import impacket
+EOF
+then
+  impacket_entry="${green}[OK]${end} impacket"
+else
+  impacket_entry="${red}[!!]${end} impacket"
+  missing_core+=("$impacket_pkg")
+fi
+
 opt_entries=()
 for cmd in "${OPTIONAL_CMDS[@]}"; do
   if have "$cmd"; then
@@ -152,7 +250,7 @@ print_grid() {
 
 echo
 echo -e "${yellow}[*]${end} ${purple}Core dependencies:${end}"
-print_grid "${core_entries[@]}"
+print_grid "${core_entries[@]}" "$impacket_entry"
 
 echo
 echo -e "${yellow}[*]${end} ${purple}Optional CMS tools:${end}"
@@ -177,9 +275,16 @@ fi
 # ---------------------------
 if [ "${#missing_core[@]}" -eq 0 ]; then
   echo
-  echo -e "${yellow}[*]${end} ${purple}All core dependencies are already installed. Starting lantern.${end}"
+  echo -e "${yellow}[*]${end} ${purple}All core dependencies are already installed.${end}"
   set_kv depcheck 1
   depcheck=1
+
+  # Optional spider tool (non-fatal)
+  echo
+  check_katana_optional
+
+  echo
+  echo -e "${yellow}[*]${end} ${purple}Starting lantern.${end}"
   echo
   exit 0
 fi
@@ -194,6 +299,11 @@ if ! command -v apt-get >/dev/null 2>&1; then
   echo -e "${yellow}    Install these manually on your platform:${end}"
   [ "${#missing_core[@]}" -gt 0 ] && echo -e "    ${yellow}Core missing:${end} ${blue}${missing_core[*]}${end}"
   [ "${#missing_opt[@]}"  -gt 0 ] && echo -e "    ${yellow}Optional missing:${end} ${blue}${missing_opt[*]}${end}"
+
+  # We can still optionally detect/install katana via go
+  echo
+  check_katana_optional
+
   echo
   echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"
   exit 0
@@ -223,6 +333,9 @@ case "$choice" in
   ""|1|*)
     echo -e "${yellow}[*]${end} ${purple}Skipping automatic package installation.${end}"
     echo
+    # Even if user skips apt installation, we can still try katana (optional)
+    check_katana_optional
+    echo
     echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"
     exit 0
     ;;
@@ -230,6 +343,8 @@ esac
 
 if [ "${#pkgs[@]}" -eq 0 ]; then
   echo -e "${yellow}[*]${end} ${purple}Nothing to install (selection resolved to empty set).${end}"
+  echo
+  check_katana_optional
   echo
   echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"
   exit 0
@@ -250,6 +365,14 @@ for cmd in "${CORE_CMDS[@]}"; do
   fi
 done
 
+# Re-check impacket as a module
+if ! python3 - <<'EOF' >/dev/null 2>&1
+import impacket
+EOF
+then
+  missing_core+=("$impacket_pkg")
+fi
+
 if [ "${#missing_core[@]}" -eq 0 ]; then
   echo
   echo -e "${yellow}[*]${end} ${green}All required core dependencies are now installed.${end}"
@@ -261,6 +384,10 @@ else
   echo -e "${red}[!] Some core dependencies are still missing after installation:${end} ${blue}${missing_core[*]}${end}"
   echo -e "${yellow}[*]${end} ${purple}Leaving${end} ${blue}depcheck=0${end} ${purple}in:${end} ${blue}${CONFIG}${end}"
 fi
+
+# Optional spider: detect/install katana and persist katanapath
+echo
+check_katana_optional
 
 echo
 echo -e "${yellow}[*]${end} ${purple}Lantern config file:${end} ${blue}${CONFIG}${end}"

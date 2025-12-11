@@ -59,7 +59,6 @@ usernames_tmp="$OUTDIR/.usernames.http.tmp"
 # --- 0) Helper: normalize deny-domains on the fly ---
 normalize_and_match_domain() {
   local domain_lc deny_file="$DENY_DOMAINS"
-
   domain_lc="$1"
 
   # If deny-domains not set or file missing/empty, no match
@@ -67,7 +66,6 @@ normalize_and_match_domain() {
     return 1
   fi
 
-  # Normalize deny-domains on the fly and compare to domain_lc
   sed 's/[#;].*$//' "$deny_file" \
     | tr '[:upper:]' '[:lower:]' \
     | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
@@ -76,17 +74,30 @@ normalize_and_match_domain() {
 }
 
 # --- 1) Aggregate per-port emails ---
+#    - from http/$PORT/emails.txt (body/contact/about)
+#    - plus emails grepped out of http/$PORT/whatweb.txt
 if [ -n "$PORTS" ]; then
   for p in $(echo "$PORTS" | tr ',' ' '); do
     p="${p//[^0-9]/}"
     [ -z "$p" ] && continue
-    f="$OUTDIR/http/$p/emails.txt"
-    [ -s "$f" ] && cat "$f" >> "$emails_tmp"
+
+    portdir="$OUTDIR/http/$p"
+    emails_file="$portdir/emails.txt"
+    whatweb_file="$portdir/whatweb.txt"
+
+    # emails collected by http-collect
+    [ -s "$emails_file" ] && cat "$emails_file" >> "$emails_tmp"
+
+    # extra emails from whatweb plugin output
+    if [ -s "$whatweb_file" ]; then
+      grep -Eoi "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" "$whatweb_file" 2>/dev/null \
+        >> "$emails_tmp" || true
+    fi
   done
 fi
 
 if [ ! -s "$emails_tmp" ]; then
-  echo -e "${yellow}  [!] No emails found in the pages.${end}"
+  echo -e "${yellow}  [!] No emails found in the pages or whatweb output.${end}"
   rm -f "$emails_tmp" "$emails_sorted" "$filtered_tmp" "$usernames_tmp"
   exit 0
 fi
@@ -98,18 +109,12 @@ sort -u "$emails_tmp" > "$emails_sorted"
 while IFS= read -r e; do
   case "$e" in
     *@*)
-      # Extract the part after @
       domain="${e##*@}"
 
-      # Normalize domain:
-      #  - lowercase
-      #  - strip any junk before the first [a-z0-9.-]
-      #  - strip anything after the last [a-z0-9.-]
       domain_lc="$(printf '%s\n' "$domain" \
         | tr '[:upper:]' '[:lower:]' \
         | sed -E 's/^[^a-z0-9.-]*//;s/[^a-z0-9.-].*$//')"
 
-      # If the normalized domain is in deny-domains, skip this email
       if normalize_and_match_domain "$domain_lc"; then
         continue
       fi
@@ -133,7 +138,7 @@ mkdir -p "$OUTDIR/http" 2>/dev/null || true
 emails_final="$OUTDIR/http/emails.txt"
 sort -u "$filtered_tmp" > "$emails_final"
 
-echo -e "${yellow}[*]${end} ${purple}Emails found in page content (after deny-domains):${end}"
+echo -e "${yellow}  [+]${end} ${purple}Emails found in HTTP content (body/contact/about + whatweb, after deny-domains):${end}"
 while IFS= read -r e; do
   echo -e "   ${blue}${e}${end}"
 done < "$emails_final"
@@ -144,12 +149,9 @@ while IFS= read -r e; do
   lp="${lp,,}"
   [ -z "$lp" ] && continue
 
-  # Always include the raw localpart
   echo "$lp" >> "$usernames_tmp"
 
-  # Simple split heuristics for common patterns (first.last, first_last, first-last)
   IFS='._-' read -r first last rest <<< "$lp"
-
   if [ -n "$first" ] && [ -n "$last" ]; then
     echo "${first}${last}"      >> "$usernames_tmp"  # johnsmith
     echo "${first:0:1}${last}"  >> "$usernames_tmp"  # jsmith
@@ -158,7 +160,7 @@ done < "$emails_final"
 
 if [ -s "$usernames_tmp" ]; then
   sort -u "$usernames_tmp" > "$OUTDIR/http/usernames-http.txt"
-  echo -e "${yellow}[*]${end} ${purple}Candidate HTTP usernames (from emails):${end}"
+  echo -e "${yellow}  [+]${end} ${purple}Candidate HTTP usernames (from emails):${end}"
   while IFS= read -r u; do
     echo -e "   ${blue}${u}${end}"
   done < "$OUTDIR/http/usernames-http.txt"

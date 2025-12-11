@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+## http-katana — optional spidering via katana
+## Usage: http-katana OUTDIR TARGET PORTS
+
+OUTDIR="${1:-}"
+TARGET="${2:-}"
+PORTS_RAW="${3:-}"
+
+if [ -z "$OUTDIR" ] || [ -z "$TARGET" ] || [ -z "$PORTS_RAW" ]; then
+  echo "[!] http-katana: Usage: http-katana OUTDIR TARGET PORTS" >&2
+  exit 2
+fi
+
+# Resolve ROOTDIR from modules/http/http-katana
+HMOD="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
+ROOTDIR="$(cd "$HMOD/../.." >/dev/null 2>&1 && pwd)"
+CONFIG="$ROOTDIR/.config"
+
+# Colors
+. "$ROOTDIR/lib/colors"
+
+# Load config
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# fd3 fallback
+if ! { : >&3; } 2>/dev/null; then
+  exec 3>&2
+fi
+
+# Resolve katana binary
+katanabin=""
+
+if [ -n "${katanapath:-}" ] && [ -x "$katanapath" ]; then
+  katanabin="$katanapath"
+elif [ -x "$ROOTDIR/bin/katana" ]; then
+  katanabin="$ROOTDIR/bin/katana"
+elif [ -x "$HOME/go/bin/katana" ]; then
+  katanabin="$HOME/go/bin/katana"
+elif command -v katana >/dev/null 2>&1; then
+  katanabin="$(command -v katana)"
+fi
+
+if [ -z "$katanabin" ]; then
+  echo -e "${yellow}  [!] http-katana: katana not found; skipping spidering.${end}" >&3
+  exit 0
+fi
+
+# Normalize ports
+PORTS="$(echo "$PORTS_RAW" | tr ',' ' ' | sed 's/[^0-9 ]//g' | sed 's/  */ /g')"
+
+if [ -z "$PORTS" ]; then
+  echo -e "${yellow}  [!] http-katana: No usable ports in PORTS='${PORTS_RAW}'. Skipping.${end}" >&3
+  exit 0
+fi
+
+echo -e "${yellow}  [*]${end} ${cyan}spidering ports with katana:${end} ${blue}${PORTS}${end}" >&3
+
+pids=()
+
+for p in $PORTS; do
+  [ -z "$p" ] && continue
+
+  # scheme heuristic
+  scheme="http"
+  case "$p" in
+    443|8443|9443) scheme="https" ;;
+  esac
+
+  url="${scheme}://${TARGET}:${p}"
+
+  portdir="$OUTDIR/http/$p"
+  mkdir -p "$portdir"
+
+  outfile="${portdir}/katana-urls.txt"
+  : > "$outfile"
+
+  # spider
+  "$katanabin" \
+    -u "$url" \
+    -d 2 \
+    -nc \
+    -silent \
+    -o "$outfile" >/dev/null 2>&1 || true &
+
+  pids+=("$!")
+done
+
+# Wait for spiders
+for pid in "${pids[@]}"; do
+  wait "$pid" 2>/dev/null || true
+done
+
+# Per-port messaging
+for p in $PORTS; do
+  f="$OUTDIR/http/$p/katana-urls.txt"
+  if [ ! -s "$f" ]; then
+    ### ADDED: message when no URLs discovered for this port
+    echo -e "${yellow}  [!]${end} ${purple}katana found no URLs on port ${blue}${p}${end}${purple}.${end}" >&3
+  fi
+done
+
+# Combined list
+combined="$OUTDIR/http/katana-urls-all.txt"
+: > "$combined"
+
+for p in $PORTS; do
+  f="$OUTDIR/http/$p/katana-urls.txt"
+  [ -f "$f" ] && cat "$f" >> "$combined"
+done
+
+if [ -s "$combined" ]; then
+  sort -u "$combined" -o "$combined"
+else
+  # (global fallback message is still kept)
+  echo -e "${yellow}  [*] http-katana: no URLs discovered by katana.${end}" >&3
+fi
+
+exit 0

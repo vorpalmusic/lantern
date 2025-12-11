@@ -125,40 +125,44 @@ if command -v timeout >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; the
     | openssl x509 -noout -text > "$DEST/cert.txt" 2>/dev/null || true
 fi
 
-# 8) whatweb fingerprint (if installed)
+# 8) whatweb fingerprint (if installed) — robust, never fatal, always leaves whatweb.txt
+: > "$DEST/whatweb.txt"
+
 if command -v whatweb >/dev/null 2>&1; then
-  # Tunables (override via env if desired)
   WHATWEB_MAX_THREADS="${WHATWEB_MAX_THREADS:-8}"
   WHATWEB_OPEN_TIMEOUT="${WHATWEB_OPEN_TIMEOUT:-6}"
   WHATWEB_READ_TIMEOUT="${WHATWEB_READ_TIMEOUT:-10}"
-  WHATWEB_TIMEOUT="${WHATWEB_TIMEOUT:-20}"       # hard cap on runtime (seconds)
+  WHATWEB_TIMEOUT="${WHATWEB_TIMEOUT:-10}"       # hard cap on runtime (seconds)
   WHATWEB_AGGRESSION="${WHATWEB_AGGRESSION:-1}"  # 1 = conservative
 
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$WHATWEB_TIMEOUT" \
-      whatweb \
-        --max-threads="$WHATWEB_MAX_THREADS" \
-        --open-timeout="$WHATWEB_OPEN_TIMEOUT" \
-        --read-timeout="$WHATWEB_READ_TIMEOUT" \
-        --aggression="$WHATWEB_AGGRESSION" \
-        --follow-redirect=same-site \
-        --color=never \
-        -v \
-        "http://$IP:$PORT/" > "$DEST/whatweb.txt" 2>&1 || true
+    if ! timeout "$WHATWEB_TIMEOUT" \
+        whatweb \
+          --max-threads="$WHATWEB_MAX_THREADS" \
+          --open-timeout="$WHATWEB_OPEN_TIMEOUT" \
+          --read-timeout="$WHATWEB_READ_TIMEOUT" \
+          --aggression="$WHATWEB_AGGRESSION" \
+          --follow-redirect=never \
+          --color=never \
+          -v \
+          "http://$IP:$PORT/" >> "$DEST/whatweb.txt" 2>&1; then
+      echo "whatweb: timeout or error (non-fatal)" >> "$DEST/whatweb.txt"
+    fi
   else
-    # Fallback: no global timeout, but still bounded threads/timeouts
-    whatweb \
-      --max-threads="$WHATWEB_MAX_THREADS" \
-      --open-timeout="$WHATWEB_OPEN_TIMEOUT" \
-      --read-timeout="$WHATWEB_READ_TIMEOUT" \
-      --aggression="$WHATWEB_AGGRESSION" \
-      --follow-redirect=same-site \
-      --color=never \
-      -v \
-      "http://$IP:$PORT/" > "$DEST/whatweb.txt" 2>&1 || true
+    if ! whatweb \
+          --max-threads="$WHATWEB_MAX_THREADS" \
+          --open-timeout="$WHATWEB_OPEN_TIMEOUT" \
+          --read-timeout="$WHATWEB_READ_TIMEOUT" \
+          --aggression="$WHATWEB_AGGRESSION" \
+          --follow-redirect=never \
+          --color=never \
+          -v \
+          "http://$IP:$PORT/" >> "$DEST/whatweb.txt" 2>&1; then
+      echo "whatweb: error (non-fatal)" >> "$DEST/whatweb.txt"
+    fi
   fi
 else
-  printf "whatweb not installed; skipping\n" > "$DEST/whatweb.txt"
+  echo "whatweb not installed; skipping" > "$DEST/whatweb.txt"
 fi
 
 # 9) quick parsed summary file (one-line each): hosts found, emails found
@@ -177,4 +181,4 @@ echo "collected:$DEST"
 [ -s "$DEST/headers.txt" ] && echo "headers saved"
 [ -s "$DEST/body.html" ] && echo "body saved (bytes: $(stat -c%s "$DEST/body.html" 2>/dev/null || echo 0))"
 [ -s "$DEST/cert.txt" ] && echo "cert saved"
-[ -s "$DEST/whatweb.txt" ] && echo "whatweb saved"
+[ -s "$DEST/whatweb.txt" ] && echo "whatweb saved (bytes: $(stat -c%s "$DEST/whatweb.txt" 2>/dev/null || echo 0))"
