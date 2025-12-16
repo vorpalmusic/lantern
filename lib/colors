@@ -1,0 +1,84 @@
+# color and text formatting library
+# lib/colors
+# author: J4CKD4W
+
+### All user-facing output MUST go through helpers (err/warn/info/ok)
+### Do not print raw color codes elsewhere.
+
+### STDOUT AND STDERR HANDLING
+out() { printf '%b\n' "$*"; }
+failout() { >&2 printf '%b\n' "$*"; }
+
+### RESET, using name $END for ease
+END="\e[0m"
+
+### COLOR CODES
+RED="\e[31m"
+ORANGE="\e[38;5;214m"
+YELLOW="\e[38;5;226m"
+GREEN="\e[38;5;40m"
+BLUE="\e[34m"
+PURPLE="\e[35m"
+CYAN="\e[36m"
+GRAY="\e[90m"
+
+###	MESSAGE CLASSIFICATION
+##	EACH TAB PRINTS TWO SPACES OF INDENTATION, USE AS 'tab 3' for 6 spaces, etc.
+TAB="  "   # two spaces per tab level
+tab() {
+  local n="${1:-0}"				# sets to 0 if no number is supplied
+  local i=0
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac		# blocks non-numeric input and sets to 0
+  while [ "$i" -lt "$n" ]; do
+    printf "%s" "$TAB"
+    i=$((i + 1))
+  done
+}
+
+#	so every later messaging function expects a tab N
+#	if there is no tab, the message should be: "" "message"
+#	1 tab: "$(tab 1)" "message", etc.
+
+## 	DEFENSIVE FUNCTION IN CASE tab IS NOT SUPPLIED TO MESSAGE HELPERS
+split() {
+  case "$1" in
+    ''|*[![:space:]]*)
+      # no indent supplied
+      ind=""
+      txt="$*"
+      ;;
+    *)
+      # indent supplied
+      ind="$1"
+      shift
+      txt="$*"
+      ;;
+  esac
+}
+
+##	STDOUT (1)
+#	NEW HEADER MESSAGES PRINT IN CYAN AFTER AN ORANGE [*]. THEY ARE PRECEDED BY A BLANK LINE
+header() {
+  out ""
+  split "$@"
+  out "${ind}${ORANGE}[*]${END} ${CYAN}${txt}${END}"
+}
+
+#	OUTPUT OF TOOLS GROUPED UNDER A GIVEN MODULE, e.g. HTTP MODULE - katana output
+subhead() { split "$@"; out "${ind}${GRAY}[-]${END} ${CYAN}${txt}${END}"; }
+
+#	TREASURE FINDINGS, e.g. domain added to /etc/hosts, probable user names added to users.txt
+treasure() { split "$@"; out "${ind}${ORANGE}[+]${END} ${GREEN}${txt}${END}"; }
+
+#       'LIST' MESSAGES BENEATH ANY HEADER OR SUB-HEADER
+item() { split "$@"; out "${ind}${GRAY}[-]${END} ${txt}"; }
+
+#       INFO MESSAGES IN ORANGE, e.g. non-essential component is missing, where to find .config, etc.
+info() { split "$@"; out "${ind}${ORANGE}[i]${END} ${txt}"; }
+
+##	STDERR (2)
+#       WARN MESSAGES -- INDICATES NON-FATAL ERROR, AT CURRENT TAB LEVEL
+warn() { split "$@"; failout "${ind}${YELLOW}[!]${END} ${txt}"; }
+
+#	ERROR MESSAGE -- RETAINS APPRORPIATE TAB LEVEL TO INDICATE TO USER WHERE IT OCCURRED
+fail() { split "$@"; failout "${ind}${RED}[!]${END} ${txt}"; }

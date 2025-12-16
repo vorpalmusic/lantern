@@ -1,0 +1,21 @@
+#!/bin/bash
+# lantern:
+# numerous automated scanning tools to produce an enriched web report
+# author: J4CKD4W
+VERSION="0.0.001"
+
+### GRAB ROOTDIR AND PATH VARS
+. "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"/lib/pathfinder
+. "$ROOTDIR"/lib/colors
+. "$ROOTDIR"/lib/args
+
+### HANDLE ARGUMENTS AND FLAGS
+parseargs "$@"
+
+case "$ACTION" in
+  help)    argshelp; exit 0 ;;
+  version) argsversion; exit 0 ;;
+  config)  nano "$CONFIG"; exit 0 ;;
+  error)   fail "${RED}Error:${END} $ARGSERR" >&2; exit 2 ;;
+  run)     : ;;
+esac

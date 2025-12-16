@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Resolve helper dir (modules) relative to this script, works via symlink
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[1]}")")" >/dev/null 2>&1 && pwd)"
+LIBDIR="$ROOTDIR/lib"
+MODDIR="$ROOTDIR/modules"
+LISTDIR="$ROOTDIR/lists"
+SCRIPTDIR="$ROOTDIR/scripts"
+BINDIR="$ROOTDIR/bin"
+CONFIG="$ROOTDIR/.config"

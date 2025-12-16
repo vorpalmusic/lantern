@@ -1,0 +1,96 @@
+# argument library and handler
+# author: J4CKD4W
+# lib/args
+
+### parse all arguments and flags
+parseargs() {
+  ACTION="run"	# default ACTION, which makes 'lantern <target>' run in default style
+  ARGSERR=""	# used to hold error message outputs
+  OUTDIR=""	# if empty, assumes OUTDIR from .config. if .config is empty, uses current directory
+  TARGET=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        ACTION="help"
+        return 0
+        ;;
+      -v|--version)
+        ACTION="version"
+        return 0
+        ;;
+      -cf|--config)
+        ACTION="config"
+        return 0
+        ;;
+      -b|--banner)
+        ACTION="banner"
+        return 0
+        ;;
+      -o|--output)
+        shift
+        if [ -z "${1:-}" ]; then
+          ACTION="error"
+          ARGSERR="Missing value for --output"
+          return 0
+        fi
+        OUTDIR="$1"
+        ;;
+      --) # end of options; remaining is positional
+        shift
+        break
+        ;;
+      -*) # unknown option
+        ACTION="error"
+        ARGSERR="Unknown option: $1"
+        return 0
+        ;;
+      *)  # positional: target
+        if [ -n "$TARGET" ]; then
+          ACTION="error"
+          ARGSERR="Unexpected extra argument: $1"
+          return 0
+        fi
+        TARGET="$1"
+        ;;
+    esac
+    shift
+  done
+
+  # If anything remains after "--", treat the first as TARGET, and reject extras
+  if [ -z "$TARGET" ] && [ $# -gt 0 ]; then
+    TARGET="$1"
+    shift
+  fi
+  if [ $# -gt 0 ]; then
+    ACTION="error"
+    ARGSERR="Unexpected extra argument: $1"
+    return 0
+  fi
+
+  if [ "$ACTION" = "run" ] && [ -z "$TARGET" ]; then
+    ACTION="error"
+    ARGSERR="You did not specify a target. Usage: 'lantern [options] <targetIP>"
+    return 0
+  fi
+}
+
+### argument-based text output functions are listed here:
+argshelp() {
+  out "${CYAN}lantern version ${VERSION} help:${END}"
+  out "${CYAN}modular pen-test enumeration and reporting${END}"
+  out ""
+  out "${PURPLE}  usage:${END} ${CYAN}lantern [options]${END} ${BLUE}<targetIP>${END}"
+  out ""
+  out "${PURPLE}  -h, --help\t\t\t print the help guide${END}"
+  out "${PURPLE}  -v, --version\t\t\t print the working lantern version${END}"
+  out "${PURPLE}  -cf, --config\t\t\t open the lantern configuration file in nano${END}"
+  out "${PURPLE}  -o, --output\t\t\t change the output directory (only for this run)${END}"
+  out "${PURPLE}\t\t\t\t for a permanent change in output directory, use the config files at lantern/.config${END}"
+  out "${PURPLE}  -b, --banner\t\t\t display banner only and then exit${END}"
+}
+
+argsversion() {
+  out "${PURPLE}lantern version${END} ${CYAN}${VERSION}${END}"
+}
+
