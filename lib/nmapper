@@ -1,0 +1,80 @@
+# lib/nmapper
+# author: J4CKD4W
+
+# expects:
+#   - pathfinder already sourced (ROOTDIR, BASEDIR, etc.)
+#   - messages already sourced (info/fail/header/follow/tab)
+#   - TARGET set/exported by lantern
+
+nmapdir() {
+  printf '%s\n' "$BASEDIR/$TARGET/nmap"
+}
+
+nmap-disc() {
+  local part1 part2 part3 pid1 pid2 pid3 discovered summary
+
+  NMAPDIR="$(nmapdir)"
+  mkdir -p "$NMAPDIR" || return 2
+
+  prtinf '\n'
+  info "${CYAN}Rapid nmap port discovery on ${BLUE}${TARGET}...${END}"
+
+  ALLPORTS="$NMAPDIR/allPorts"
+  part1="$NMAPDIR/allPorts.p1"
+  part2="$NMAPDIR/allPorts.p2"
+  part3="$NMAPDIR/allPorts.p3"
+
+  rm -f "$ALLPORTS" "$part1" "$part2" "$part3"
+
+  sudo nmap -p1-22000 --open -sS -n -Pn --min-rate 2500 \
+    --max-retries 1 -T3 -oG "$part1" "$TARGET" >/dev/null 2>&1 &
+  pid1=$!
+
+  sudo nmap -p22001-44000 --open -sS -n -Pn --min-rate 2500 \
+    --max-retries 1 -T3 -oG "$part2" "$TARGET" >/dev/null 2>&1 &
+  pid2=$!
+
+  sudo nmap -p44001-65535 --open -sS -n -Pn --min-rate 2500 \
+    --max-retries 1 -T3 -oG "$part3" "$TARGET" >/dev/null 2>&1 &
+  pid3=$!
+
+  wait "$pid1" "$pid2" "$pid3" 2>/dev/null || true
+
+  : > "$ALLPORTS"
+  [ -f "$part1" ] && cat "$part1" >> "$ALLPORTS"
+  [ -f "$part2" ] && cat "$part2" >> "$ALLPORTS"
+  [ -f "$part3" ] && cat "$part3" >> "$ALLPORTS"
+  rm -f "$part1" "$part2" "$part3"
+
+  discovered="$(grep -oP '\d{1,5}/open' "$ALLPORTS" 2>/dev/null \
+                | cut -d'/' -f1 | sort -n -u || true)"
+
+  if [ -z "$discovered" ]; then
+    fail "$(tab 2)" "No open ports discovered."
+    PORTS=""
+    return 2
+  fi
+
+  summary="$(echo "$discovered" | tr '\n' ',' | sed 's/,$//')"
+  info "$(tab 2)" "${PURPLE}Open ports discovered: ${BLUE}${summary}${END}"
+
+  PORTS="$(echo "$discovered" | xargs | tr ' ' ',')"
+  return 0
+}
+
+nmap-targeted() {
+  TARGETEDXML="$NMAPDIR/targetedXML"
+
+  if [ -z "${PORTS:-}" ]; then
+    fail "$(tab 1)" "No open ports detected; skipping targeted scan."
+    return 2
+  fi
+
+  header "Targeted scanning on discovered ports... if there are many, this could take a while..."
+  follow "$(tab 2)" "Results will populate the web report."
+
+  sudo nmap -sCV -p"$PORTS" -n -Pn --max-retries 2 --host-timeout 120s "$TARGET" \
+    -oX "$TARGETEDXML" >/dev/null 2>&1
+
+  return $?
+}

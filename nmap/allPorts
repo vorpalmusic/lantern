@@ -1,0 +1,8 @@
+# Nmap 7.95 scan initiated Thu Dec 18 10:46:49 2025 as: /usr/lib/nmap/nmap -p1-22000 --open -sS -n -Pn --min-rate 2500 --max-retries 1 -T3 -oG /home/kali/lantern/nmap/allPorts.p1 10.129.11.216
+Host: 10.129.11.216 ()	Status: Up
+Host: 10.129.11.216 ()	Ports: 80/open/tcp//http///, 445/open/tcp//microsoft-ds///, 3000/open/tcp//ppp///, 3389/open/tcp//ms-wbt-server///	Ignored State: filtered (21996)
+# Nmap done at Thu Dec 18 10:47:07 2025 -- 1 IP address (1 host up) scanned in 17.84 seconds
+# Nmap 7.95 scan initiated Thu Dec 18 10:46:49 2025 as: /usr/lib/nmap/nmap -p22001-44000 --open -sS -n -Pn --min-rate 2500 --max-retries 1 -T3 -oG /home/kali/lantern/nmap/allPorts.p2 10.129.11.216
+# Nmap done at Thu Dec 18 10:47:08 2025 -- 1 IP address (1 host up) scanned in 18.89 seconds
+# Nmap 7.95 scan initiated Thu Dec 18 10:46:49 2025 as: /usr/lib/nmap/nmap -p44001-65535 --open -sS -n -Pn --min-rate 2500 --max-retries 1 -T3 -oG /home/kali/lantern/nmap/allPorts.p3 10.129.11.216
+# Nmap done at Thu Dec 18 10:47:08 2025 -- 1 IP address (1 host up) scanned in 18.72 seconds

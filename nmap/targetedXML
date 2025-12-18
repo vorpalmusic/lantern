@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.95 scan initiated Thu Dec 18 10:47:08 2025 as: /usr/lib/nmap/nmap -sCV -p80,445,3000,3389 -n -Pn -&#45;max-retries 2 -&#45;host-timeout 120s -oX /home/kali/lantern/nmap/targetedXML 10.129.11.216 -->
+<nmaprun scanner="nmap" args="/usr/lib/nmap/nmap -sCV -p80,445,3000,3389 -n -Pn -&#45;max-retries 2 -&#45;host-timeout 120s -oX /home/kali/lantern/nmap/targetedXML 10.129.11.216" start="1766072828" startstr="Thu Dec 18 10:47:08 2025" version="7.95" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="4" services="80,445,3000,3389"/>

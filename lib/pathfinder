@@ -4,16 +4,10 @@
 
 ### FIRST, DISCOVER THE LANTERN TOOL AND GRAB ITS DIRECTORY AS ROOTDIR
 MYBIN="$(command -v lantern 2>/dev/null || true)"
-if [ -z "$MYBIN" ]; then
-  exit 2
-fi
-
 ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "$MYBIN")")" >/dev/null 2>&1 && pwd)"
-if [ -z "$ROOTDIR" ] || [ ! -f "$ROOTDIR/lantern" ]; then
-  exit 2
-fi
+. "$ROOTDIR/.config"
 
-### Resolve helper dir (modules) relative to this script, works via symlink
+### Resolve helper directories relative to this script, works via symlink
 LIBDIR="$ROOTDIR/lib"
 MODDIR="$ROOTDIR/modules"
 LISTDIR="$ROOTDIR/lists"
@@ -21,3 +15,6 @@ SCRIPTDIR="$ROOTDIR/scripts"
 BINDIR="$ROOTDIR/bin"
 CONFIG="$ROOTDIR/.config"
 REQSDIR="$LISTDIR/reqs"
+
+### Resolve local output directories, defaulting to the current working dir if not set in .config
+BASEDIR="$(cd -- "$OUTFOLDER" 2>/dev/null && pwd -P)" || BASEDIR="$(pwd -P)"

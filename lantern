@@ -3,13 +3,15 @@
 ### modular and automated pen-testing enumeration and reporting tool
 ### author: J4CKD4W
 
-### GRAB ROOTDIR AND PATH VARS
-. "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)/lib/pathfinder"
+### Grab ROOTDIR, path variables and necessary libraries
+PATHFINDER="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)/lib/pathfinder"
+export PATHFINDER
+. "$PATHFINDER"
 . "$ROOTDIR/lib/messages"
 . "$ROOTDIR/lib/args"
 . "$CONFIG"
 
-### HANDLE ARGUMENTS AND FLAGS
+### Handle arguments and flags
 parseargs "$@"
 
 case "$ACTION" in
@@ -20,7 +22,30 @@ case "$ACTION" in
   run)     : ;;
 esac
 
+### parseargs determined the target. ALL other scripts will need it. ONLY this and PATHFINDER are exported
+export TARGET
+
+### now source libraries that depend on TARGET being set
+. "$LIBDIR/nmapper"
+
 ### CHECK WHETHER THIS IS FIRST RUN AND DEPENDENCIES WERE ALREADY CHECKED
 if [ "$INIT" -eq 1 ] || [ "$DEPCHECK" -eq 0 ]; then
   "$SCRIPTDIR/bootstrap"
 fi
+
+### disclaimers
+info "${PURPLE}lantern is intended for ${RED}ETHICAL hacking only.${END} " \
+  "${ORANGE}Please do not use it to break the law.${END}"
+info "${PURPLE}lantern config file is at: ${BLUE}${CONFIG}${END}"
+
+"$SCRIPTDIR/banner"			# cue banner
+
+### let's make our output folders finally
+mkdir -p "${BASEDIR}/${TARGET}"
+
+### FINALLY, LFG!
+nmap-disc || exit 2
+nmap-targeted &
+nmappid=$!
+
+### time to launch service modules in parallel with targeted scan

@@ -8,7 +8,7 @@
 ### STDOUT AND STDERR HANDLING
 out() { printf '%b\n' "$*"; }
 failout() { >&2 printf '%b\n' "$*"; }
-prompt() { printf '%b' "${ORANGE}[?] $*"${END}; }
+prompt() { printf '%b' "${ORANGE}[?] $*${END}"; }
 
 ### RESET, using name $END for ease
 END="\e[0m"
@@ -63,6 +63,12 @@ header() {
   out ""
   split "$@"
   out "${ind}${ORANGE}[*] ${CYAN}${txt}${END}"
+}
+
+#	FOLLOW messages allow indent and have no "bullet", e.g. [*]
+follow() {
+  split "$@"
+  out "${ind}${PURPLE}${txt}${END}"
 }
 
 #	STATUS MESSAGES PRINT IN PURPLE AFTER AN ORANGE [*]. 
