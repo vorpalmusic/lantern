@@ -1,13 +1,13 @@
 #!/bin/bash
-# lantern:
-# numerous automated scanning tools to produce an enriched web report
-# author: J4CKD4W
-VERSION="0.0.001"
+### lantern:
+### modular and automated pen-testing enumeration and reporting tool
+### author: J4CKD4W
 
 ### GRAB ROOTDIR AND PATH VARS
-. "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"/lib/pathfinder
-. "$ROOTDIR"/lib/colors
-. "$ROOTDIR"/lib/args
+. "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)/lib/pathfinder"
+. "$ROOTDIR/lib/messages"
+. "$ROOTDIR/lib/args"
+. "$CONFIG"
 
 ### HANDLE ARGUMENTS AND FLAGS
 parseargs "$@"
@@ -19,3 +19,8 @@ case "$ACTION" in
   error)   fail "${RED}Error:${END} $ARGSERR" >&2; exit 2 ;;
   run)     : ;;
 esac
+
+### CHECK WHETHER THIS IS FIRST RUN AND DEPENDENCIES WERE ALREADY CHECKED
+if [ "$INIT" eq 1 ] || [ "$DEPCHECK" eq 0 ]; then
+  "$SCRIPTDIR/bootstrap"
+fi

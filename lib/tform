@@ -1,0 +1,47 @@
+# lib/tform
+# text formatting helpers (columns, lists)
+# author: J4CKD4W
+
+# makecols COLS WIDTH [items...]
+# Prints items in fixed-width columns.
+# - COLS  : number of columns (e.g., 3, 4)
+# - WIDTH : width of each column (e.g., 18, 22)
+# - items : list of strings to print
+#
+# Notes:
+# - Uses printf only (no external deps)
+# - Does NOT add color itself (callers can color headers)
+makecols() {
+  local cols="${1:-4}"
+  local width="${2:-20}"
+  shift 2 || true
+
+  local i=0 item
+  for item in "$@"; do
+    # skip empty items (helps if callers pass blanks)
+    [ -z "$item" ] && continue
+
+    # two-space indent + left-aligned padded field
+    printf '  %-*s' "$width" "$item"
+    i=$((i+1))
+
+    if [ $((i % cols)) -eq 0 ]; then
+      printf '\n'
+    fi
+  done
+
+  # finish the last row
+  if [ $((i % cols)) -ne 0 ]; then
+    printf '\n'
+  fi
+}
+
+# makelist [items...]
+# One item per line, indented two spaces.
+makelist() {
+  local item
+  for item in "$@"; do
+    [ -z "$item" ] && continue
+    printf '  %s\n' "$item"
+  done
+}

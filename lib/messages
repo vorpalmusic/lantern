@@ -1,5 +1,5 @@
-# color and text formatting library
-# lib/colors
+# color and messaging formatting library
+# lib/messages
 # author: J4CKD4W
 
 ### All user-facing output MUST go through helpers (err/warn/info/ok)
@@ -8,17 +8,18 @@
 ### STDOUT AND STDERR HANDLING
 out() { printf '%b\n' "$*"; }
 failout() { >&2 printf '%b\n' "$*"; }
+prompt() { printf '%b' "${ORANGE}[?] $*"${END}; }
 
 ### RESET, using name $END for ease
 END="\e[0m"
 
 ### COLOR CODES
 RED="\e[31m"
-ORANGE="\e[38;5;214m"
+ORANGE="\033[38;5;208m"
 YELLOW="\e[38;5;226m"
-GREEN="\e[38;5;40m"
+GREEN="\033[38;5;40m"
 BLUE="\e[34m"
-PURPLE="\e[35m"
+PURPLE="\033[38;5;92m"
 CYAN="\e[36m"
 GRAY="\e[90m"
 
@@ -61,24 +62,28 @@ split() {
 header() {
   out ""
   split "$@"
-  out "${ind}${ORANGE}[*]${END} ${CYAN}${txt}${END}"
+  out "${ind}${ORANGE}[*] ${CYAN}${txt}${END}"
 }
 
-#	OUTPUT OF TOOLS GROUPED UNDER A GIVEN MODULE, e.g. HTTP MODULE - katana output
-subhead() { split "$@"; out "${ind}${GRAY}[-]${END} ${CYAN}${txt}${END}"; }
+#	STATUS MESSAGES PRINT IN PURPLE AFTER AN ORANGE [*]. 
+status() {
+  split "$@"
+  out "${ind}${ORANGE}[*] ${PURPLE}${txt}${END}"
+}
 
 #	TREASURE FINDINGS, e.g. domain added to /etc/hosts, probable user names added to users.txt
-treasure() { split "$@"; out "${ind}${ORANGE}[+]${END} ${GREEN}${txt}${END}"; }
+treasure() { split "$@"; out "${ind}${ORANGE}[+] ${GREEN}${txt}${END}"; }
 
-#       'LIST' MESSAGES BENEATH ANY HEADER OR SUB-HEADER
-item() { split "$@"; out "${ind}${GRAY}[-]${END} ${txt}"; }
+#       'LIST' MESSAGES BENEATH ANY HEADER OR SUB-HEADER, usually take at least one tab
+item() { split "$@"; out "${ind}${ORANGE}[:] ${BLUE}${txt}${END}"; }
 
-#       INFO MESSAGES IN ORANGE, e.g. non-essential component is missing, where to find .config, etc.
-info() { split "$@"; out "${ind}${ORANGE}[i]${END} ${txt}"; }
+#       INFO MESSAGES, e.g. non-essential component is missing, where to find .config, etc.
+#	color after [*] is not set because it may contain multiple colors
+info() { split "$@"; out "${ind}${ORANGE}[*]${END} ${txt}"; }
 
 ##	STDERR (2)
-#       WARN MESSAGES -- INDICATES NON-FATAL ERROR, AT CURRENT TAB LEVEL
-warn() { split "$@"; failout "${ind}${YELLOW}[!]${END} ${txt}"; }
+#       WARN MESSAGES -- INDICATES NON-FATAL ERROR, AT CURRENT TAB LEVEL, in yellow
+warn() { split "$@"; failout "${ind}${YELLOW}[!] ${txt}${END}"; }
 
 #	ERROR MESSAGE -- RETAINS APPRORPIATE TAB LEVEL TO INDICATE TO USER WHERE IT OCCURRED
-fail() { split "$@"; failout "${ind}${RED}[!]${END} ${txt}"; }
+fail() { split "$@"; failout "${ind}${RED}[!] ${txt}${END}"; }

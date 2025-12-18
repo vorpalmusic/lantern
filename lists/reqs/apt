@@ -1,0 +1,15 @@
+coreutils
+curl
+bind9-dnsutils
+golang-go
+joomscan
+lftp
+lsof
+nmap
+openssl
+psmisc
+python3
+whatweb
+wpscan
+xmlstarlet
+xsltproc

@@ -77,7 +77,7 @@ parseargs() {
 
 ### argument-based text output functions are listed here:
 argshelp() {
-  out "${CYAN}lantern version ${VERSION} help:${END}"
+  out "${PURPLE}lantern${END} ${CYAN}version ${VERSION}${END}"
   out "${CYAN}modular pen-test enumeration and reporting${END}"
   out ""
   out "${PURPLE}  usage:${END} ${CYAN}lantern [options]${END} ${BLUE}<targetIP>${END}"
@@ -91,6 +91,5 @@ argshelp() {
 }
 
 argsversion() {
-  out "${PURPLE}lantern version${END} ${CYAN}${VERSION}${END}"
+  out "${PURPLE}lantern${END} ${CYAN}version ${VERSION}${END}"
 }
-

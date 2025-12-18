@@ -1,10 +1,23 @@
-#!/bin/bash
+# pathfinder creates global variables for all relevant paths and is then sourced by all scripts
+# lib/pathfinder
+# author: J4CKD4W
 
-# Resolve helper dir (modules) relative to this script, works via symlink
-ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[1]}")")" >/dev/null 2>&1 && pwd)"
+### FIRST, DISCOVER THE LANTERN TOOL AND GRAB ITS DIRECTORY AS ROOTDIR
+MYBIN="$(command -v lantern 2>/dev/null || true)"
+if [ -z "$MYBIN" ]; then
+  exit 2
+fi
+
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "$MYBIN")")" >/dev/null 2>&1 && pwd)"
+if [ -z "$ROOTDIR" ] || [ ! -f "$ROOTDIR/lantern" ]; then
+  exit 2
+fi
+
+### Resolve helper dir (modules) relative to this script, works via symlink
 LIBDIR="$ROOTDIR/lib"
 MODDIR="$ROOTDIR/modules"
 LISTDIR="$ROOTDIR/lists"
 SCRIPTDIR="$ROOTDIR/scripts"
 BINDIR="$ROOTDIR/bin"
 CONFIG="$ROOTDIR/.config"
+REQSDIR="$LISTDIR/reqs"

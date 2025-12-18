@@ -1,0 +1,2 @@
+# Go install targets (import paths), one per line
+github.com/projectdiscovery/katana/cmd/katana
