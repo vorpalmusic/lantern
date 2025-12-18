@@ -4,3 +4,6 @@
 
 tmp="$(mktemp)"
 sed -E 's/^INIT=.*/INIT=1/' .config > "$tmp" && mv "$tmp" .config
+
+tmp="$(mktemp)"
+sed -E 's/^DEPCHECK=.*/DEPCHECK=0/' .config > "$tmp" && mv "$tmp" .config

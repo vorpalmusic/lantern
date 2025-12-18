@@ -21,6 +21,6 @@ case "$ACTION" in
 esac
 
 ### CHECK WHETHER THIS IS FIRST RUN AND DEPENDENCIES WERE ALREADY CHECKED
-if [ "$INIT" eq 1 ] || [ "$DEPCHECK" eq 0 ]; then
+if [ "$INIT" -eq 1 ] || [ "$DEPCHECK" -eq 0 ]; then
   "$SCRIPTDIR/bootstrap"
 fi
