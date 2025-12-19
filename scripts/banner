@@ -75,7 +75,8 @@ for i in "${!BANNER[@]}"; do
   # If this is the last ASCII line, append version on SAME line (colored),
   # but clip the logo line to leave room for the visible " v$VERSION".
   if (( i == n - 1 )); then
-    visver=" v${VERSION}"
+    verpad=4                              # <- how many spaces before v
+    visver="$(printf '%*s' "$verpad" '')v${VERSION}"
     verlen=${#visver}
     eff_logo=$(( effective - verlen ))
     (( eff_logo < 1 )) && eff_logo=1
@@ -89,8 +90,8 @@ for i in "${!BANNER[@]}"; do
       printf "\033[38;5;%sm%*s%s\033[0m" "$color" "$pad" "" "$line"
     fi
 
-    # version: print with %b so literal \033 sequences in $RED/$END render
-    printf '%b\n' " ${RED}v${VERSION}${END}"
+    # print version with the same padding you reserved
+    printf '%b\n' "${RED}${visver}${END}"
     continue
   fi
 

@@ -1,22 +1,20 @@
-# lib/nmapper
-# author: J4CKD4W
+### predefined nmap scan types for lantern
+### lib/nmapper
+### author: J4CKD4W
 
 # expects:
 #   - pathfinder already sourced (ROOTDIR, BASEDIR, etc.)
 #   - messages already sourced (info/fail/header/follow/tab)
 #   - TARGET set/exported by lantern
 
-nmapdir() {
-  printf '%s\n' "$BASEDIR/$TARGET/nmap"
-}
+
+NMAPDIR="$BASEDIR/$TARGET/nmap"
+mkdir -p $NMAPDIR
 
 nmap-disc() {
   local part1 part2 part3 pid1 pid2 pid3 discovered summary
 
-  NMAPDIR="$(nmapdir)"
-  mkdir -p "$NMAPDIR" || return 2
-
-  prtinf '\n'
+  printf '\n'
   info "${CYAN}Rapid nmap port discovery on ${BLUE}${TARGET}...${END}"
 
   ALLPORTS="$NMAPDIR/allPorts"
@@ -38,8 +36,18 @@ nmap-disc() {
     --max-retries 1 -T3 -oG "$part3" "$TARGET" >/dev/null 2>&1 &
   pid3=$!
 
-  wait "$pid1" "$pid2" "$pid3" 2>/dev/null || true
+  ## check for failures of the scans
+  rc=0
 
+  wait "$pid1"; s1=$?
+  wait "$pid2"; s2=$?
+  wait "$pid3"; s3=$?
+
+  [ $s1 -eq 0 ] || { warn "$(tab 2)" "Discovery scan failed: ports 1-22000 (rc=$s1)"; rc=1; }
+  [ $s2 -eq 0 ] || { warn "$(tab 2)" "Discovery scan failed: ports 22001-44000 (rc=$s2)"; rc=1; }
+  [ $s3 -eq 0 ] || { warn "$(tab 2)" "Discovery scan failed: ports 44001-65535 (rc=$s3)"; rc=1; }
+
+  ## aggregate discovered ports
   : > "$ALLPORTS"
   [ -f "$part1" ] && cat "$part1" >> "$ALLPORTS"
   [ -f "$part2" ] && cat "$part2" >> "$ALLPORTS"
@@ -63,7 +71,7 @@ nmap-disc() {
 }
 
 nmap-targeted() {
-  TARGETEDXML="$NMAPDIR/targetedXML"
+  TARGETEDXML="$NMAPDIR/targeted.xml"
 
   if [ -z "${PORTS:-}" ]; then
     fail "$(tab 1)" "No open ports detected; skipping targeted scan."

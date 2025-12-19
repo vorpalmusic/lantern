@@ -1,0 +1,30 @@
+### sudo handler. lantern needs sudo for a few things, but we don't want it to run in sudo
+### lib/priv
+### author: J4CKD4W
+
+SPID=""
+
+sinit() {
+  command -v sudo >/dev/null 2>&1 || exit 1
+
+  # prompt once up-front
+  sudo -v || exit 1
+
+  # keep sudo alive
+  ( while true; do
+      sudo -n -v >/dev/null 2>&1 || exit 0
+      sleep 45
+    done ) &
+  SPID="$!"
+
+  trap 'scleanup' EXIT INT TERM
+}
+
+scleanup() {
+  if [ -n "${SPID:-}" ] && kill -0 "$SPID" 2>/dev/null; then
+    kill "$SPID" 2>/dev/null || true
+    wait "$SPID" 2>/dev/null || true
+  fi
+
+  sudo -k >/dev/null 2>&1 || true
+}

@@ -3,13 +3,23 @@
 ### modular and automated pen-testing enumeration and reporting tool
 ### author: J4CKD4W
 
+### DO NOT RUN LANTERN AS ROOT
+if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+  fail "Run as a normal user; lantern will ask for sudo when needed." >&2
+  exit 1
+fi
+
 ### Grab ROOTDIR, path variables and necessary libraries
 PATHFINDER="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)/lib/pathfinder"
 export PATHFINDER
 . "$PATHFINDER"
 . "$ROOTDIR/lib/messages"
 . "$ROOTDIR/lib/args"
+. "$LIBDIR/priv"
 . "$CONFIG"
+
+info "${CYAN}lantern should never be run as sudo, but requires sudo for some tasks. Please authorize now.${END}"
+sinit
 
 ### Handle arguments and flags
 parseargs "$@"
