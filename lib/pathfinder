@@ -2,9 +2,8 @@
 # lib/pathfinder
 # author: J4CKD4W
 
-### FIRST, DISCOVER THE LANTERN TOOL AND GRAB ITS DIRECTORY AS ROOTDIR
-MYBIN="$(command -v lantern 2>/dev/null || true)"
-ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "$MYBIN")")" >/dev/null 2>&1 && pwd)"
+### FIRST, DISCOVER THE LANTERN DIRECTORY AS ROOTDIR
+ROOTDIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)"
 . "$ROOTDIR/.config"
 
 ### Resolve helper directories relative to this script, works via symlink
@@ -15,6 +14,3 @@ SCRIPTDIR="$ROOTDIR/scripts"
 BINDIR="$ROOTDIR/bin"
 CONFIG="$ROOTDIR/.config"
 REQSDIR="$LISTDIR/reqs"
-
-### Resolve local output directories, defaulting to the current working dir if not set in .config
-BASEDIR="$(cd -- "$OUTFOLDER" 2>/dev/null && pwd -P)" || BASEDIR="$(pwd -P)"

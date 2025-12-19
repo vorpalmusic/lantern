@@ -8,7 +8,7 @@
 #   - TARGET set/exported by lantern
 
 
-NMAPDIR="$BASEDIR/$TARGET/nmap"
+NMAPDIR="$OUTDIR/nmap"
 mkdir -p $NMAPDIR
 
 nmap-disc() {
@@ -17,12 +17,12 @@ nmap-disc() {
   printf '\n'
   info "${CYAN}Rapid nmap port discovery on ${BLUE}${TARGET}...${END}"
 
-  ALLPORTS="$NMAPDIR/allPorts"
-  part1="$NMAPDIR/allPorts.p1"
-  part2="$NMAPDIR/allPorts.p2"
-  part3="$NMAPDIR/allPorts.p3"
+  discmap="$NMAPDIR/disc.gnmap"
+  part1="$NMAPDIR/ports.p1"
+  part2="$NMAPDIR/ports.p2"
+  part3="$NMAPDIR/ports.p3"
 
-  rm -f "$ALLPORTS" "$part1" "$part2" "$part3"
+  rm -f "$discmap" "$part1" "$part2" "$part3"
 
   sudo nmap -p1-22000 --open -sS -n -Pn --min-rate 2500 \
     --max-retries 1 -T3 -oG "$part1" "$TARGET" >/dev/null 2>&1 &
@@ -48,13 +48,13 @@ nmap-disc() {
   [ $s3 -eq 0 ] || { warn "$(tab 2)" "Discovery scan failed: ports 44001-65535 (rc=$s3)"; rc=1; }
 
   ## aggregate discovered ports
-  : > "$ALLPORTS"
-  [ -f "$part1" ] && cat "$part1" >> "$ALLPORTS"
-  [ -f "$part2" ] && cat "$part2" >> "$ALLPORTS"
-  [ -f "$part3" ] && cat "$part3" >> "$ALLPORTS"
+  : > "$discmap"
+  [ -f "$part1" ] && cat "$part1" >> "$discmap"
+  [ -f "$part2" ] && cat "$part2" >> "$discmap"
+  [ -f "$part3" ] && cat "$part3" >> "$discmap"
   rm -f "$part1" "$part2" "$part3"
 
-  discovered="$(grep -oP '\d{1,5}/open' "$ALLPORTS" 2>/dev/null \
+  discovered="$(grep -oP '\d{1,5}/open' "$discmap" 2>/dev/null \
                 | cut -d'/' -f1 | sort -n -u || true)"
 
   if [ -z "$discovered" ]; then

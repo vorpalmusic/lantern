@@ -1,0 +1,39 @@
+### /lantern/lib/parse/parse-nmap
+### parsing library to extract maximum value from nmap scans
+### author: J4CKD4W
+
+nmapdir="$OUTDIR/nmap/"
+mkdir -p "$nmapdir"
+
+nmap-services() {
+  local in="${1:-${nmapdir}/disc.gnmap}"
+  local out="${2:-${nmapdir}/services.tsv}"
+
+  grep 'Ports:' "$in" 2>/dev/null \
+    | sed 's/^.*Ports: //' \
+    | tr ',' '\n' \
+    | sed 's/^ *//; s/ *$//' \
+    | awk -F'/' '$2=="open" && $1 ~ /^[0-9]+$/ { svc=$5; if(svc=="") svc="unknown"; print $1 "\t" $3 "\t" svc }' \
+    | sort -n -k1,1 -u > "$out"
+}
+
+nmap-check() {
+  local in="${1:-${nmapdir}/services.tsv}"
+  [ -s "$in" ] || { warn "Early http validation skipped: services.tsv missing/empty."; return 2; }
+
+  local -A webports
+
+  # read web port list safely
+  while IFS= read -r p; do
+    [[ "$p" =~ ^[0-9]+$ ]] || continue
+    webports["$p"]=1
+  done < "${LISTDIR}/ports/http"
+
+  # read services.tsv (TSV parsing stays as-is)
+  while IFS=$'\t' read -r port proto hint; do
+    if [[ "${hint,,}" == *http* || "${hint,,}" == *ssl* || "${hint,,}" == *tls* \
+      || -n "${webports[$port]:-}" ]]; then
+      printf '%s\n' "$port"
+    fi
+  done < "$in"
+}

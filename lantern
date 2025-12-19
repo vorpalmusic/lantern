@@ -11,7 +11,6 @@ fi
 
 ### Grab ROOTDIR, path variables and necessary libraries
 PATHFINDER="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)/lib/pathfinder"
-export PATHFINDER
 . "$PATHFINDER"
 . "$ROOTDIR/lib/messages"
 . "$ROOTDIR/lib/args"
@@ -32,11 +31,26 @@ case "$ACTION" in
   run)     : ;;
 esac
 
-### parseargs determined the target. ALL other scripts will need it. ONLY this and PATHFINDER are exported
-export TARGET
+### Resolve BASEDIR from config-defined OUTFOLDER
+# OUTFOLDER defaults to "." in .config
+mkdir -p -- "${OUTFOLDER:-.}" \
+  || { fail "Cannot create outfolder: ${OUTFOLDER:-.}"; exit 2; }
+
+BASEDIR="$(cd -- "${OUTFOLDER:-.}" && pwd -P)" \
+  || { fail "Cannot resolve outfolder: ${OUTFOLDER:-.}"; exit 2; }
+
+# Engagement directory is always BASEDIR/TARGET
+OUTDIR="$BASEDIR/$TARGET"
+
+# Export only the run-scoped state that executed scripts need
+export ROOTDIR BASEDIR OUTDIR TARGET
+
+### let's make our output folders finally
+mkdir -p "$OUTDIR"
 
 ### now source libraries that depend on TARGET being set
 . "$LIBDIR/nmapper"
+. "$LIBDIR/parse/parse-nmap"
 
 ### CHECK WHETHER THIS IS FIRST RUN AND DEPENDENCIES WERE ALREADY CHECKED
 if [ "$INIT" -eq 1 ] || [ "$DEPCHECK" -eq 0 ]; then
@@ -50,12 +64,16 @@ info "${PURPLE}lantern config file is at: ${BLUE}${CONFIG}${END}"
 
 "$SCRIPTDIR/banner"			# cue banner
 
-### let's make our output folders finally
-mkdir -p "${BASEDIR}/${TARGET}"
-
 ### FINALLY, LFG!
 nmap-disc || exit 2
-nmap-targeted &
-nmappid=$!
+nmap-services
+nmap-check
 
-### time to launch service modules in parallel with targeted scan
+### Start targeted nmap based on discovery scan
+nmap-targeted & nmappid=$!
+
+### time to launch early service modules in parallel with targeted scan
+nmap-check | "$MODDIR/http/http-early" & checkid=$!
+
+### wait for targeted scan to produce its artifacts before running full service modules
+wait "$nmappid" "$checkid"
