@@ -18,7 +18,7 @@ PATHFINDER="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/de
 . "$CONFIG"
 
 info "${CYAN}lantern should never be run as sudo, but requires sudo for some tasks. Please authorize now.${END}"
-sinit
+sinit			# handle sudo only for required tasks
 
 ### Handle arguments and flags
 parseargs "$@"
@@ -73,7 +73,7 @@ nmap-check
 nmap-targeted & nmappid=$!
 
 ### time to launch early service modules in parallel with targeted scan
-nmap-check | "$MODDIR/http/http-early" & checkid=$!
+nmap-check | "$MODDIR/http/http-validate" & checkid=$!
 
 ### wait for targeted scan to produce its artifacts before running full service modules
 wait "$nmappid" "$checkid"

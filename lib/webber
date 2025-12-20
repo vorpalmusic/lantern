@@ -1,0 +1,94 @@
+### lantern/lib/webber
+### predefined http-related functions
+### author: J4CKD4W
+
+### initial directory creation
+mkhttpdir() {
+  httpdir="$BASEDIR/$TARGET/http"
+  mkdir -p -- "$httpdir"
+}
+
+### baked curl calls, with important parameters
+### curler <port> <path-prefix> [options]
+### port:       e.g. 80 or 443
+### prefix:	e.g. $BASDIR/$TARGET/validate/$PORT/	(tells curler where to dump the outputs)
+### scheme: 	http or https	("" or "-s")
+### follow: 	no or yes	("" or "-L")
+### host:	default=none	(-h "hostname")
+### path:	default /	(-p "path")
+curler() {
+  ### argument variables
+  scheme="http"
+  follow=""
+  host=""
+  path="/"
+  argserr=""
+  ### handle all arguments and flags
+  port="$1"; shift
+  prefix="$1"; shift
+  
+  ### process all optional arguments
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -s)
+	scheme="https"
+	shift
+	;;
+      -L)
+	follow="-L"
+	shift
+	;;
+      -h)
+	shift
+	if [ -z "${1:-}" ] || [[ "${1:-}" =~ ^- ]]; then
+	  argserr="Webber: Missing value for hostname. use '-h <hostname>'"
+	  return 2
+	fi
+	host="$1"
+	shift
+	;;
+      -p)
+	shift
+	if [ -z "${1:-}" ] || [[ "${1:-}" =~ ^- ]]; then
+	  argserr="Webber: Missing value for extended path. use '-p <path>'"
+	  return 2
+	fi
+	path="$1"
+	shift
+	;;
+      -*)
+	argserr="Webber: Unknown option: $1"
+	return 2
+	;;
+      *)
+        argserr="Webber: Unexpected argument: $1"
+        return 2
+        ;;
+    esac
+  done
+
+  ### assign file output names
+  prefix+="/$scheme."
+  if [ "$follow" = "-L" ]; then prefix+="follow."; else prefix+="nofollow."; fi
+  ### iterate over variable names to append them to the end of the file output names, e.g. http.follow.body
+  for v in body meta header error; do
+    printf -v "$v" '%s%s' "$prefix" "$v"
+  done
+
+  : > "$header"; : > "$body"; : > "$error"; : > "$meta"
+
+  ### begin curl
+  k=""
+  [ "$scheme" = "https" ] && k="-k"
+  curl $k $follow -sS \
+    --connect-timeout 4 \
+    --max-time 10 \
+    --path-as-is \
+    -D "$header" \
+    -o "$body" \
+    -w "http_code=%{http_code}\turl_effective=%{url_effective}\tredirect_url=%{redirect_url}\tnum_redirects=%{num_redirects}\tcontent_type=%{content_type}\tsize=%{size_download}\tremote=%{remote_ip}:%{remote_port}\tt_connect=%{time_connect}\tt_appconnect=%{time_appconnect}\tttfb=%{time_starttransfer}\tt_total=%{time_total}\tssl=%{ssl_verify_result}\n" \
+    "${scheme}://$TARGET:${port}${path}" \
+    1>>"$meta" 2>>"$error"
+
+  rc=$?
+}

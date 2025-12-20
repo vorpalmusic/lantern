@@ -1,0 +1,59 @@
+#!/bin/bash
+### lantern/modules/http/http-validate
+### very early simple validation for probable web ports
+### author: J4CKD4W
+
+. "$ROOTDIR/lib/messages"
+. "$ROOTDIR/lib/webber"
+
+# require ports on stdin (nmap-check | http-early ...)
+if [ -t 0 ]; then
+  fail "http-validate: expected ports on stdin (pipe nmap-check into http-validate)"
+  exit 2
+fi
+
+### make directories if they don't already exist
+mkhttpdir			# makes $OUTDIR/http and assigns path to httpdir variable
+mydir="$httpdir/validate"
+mkdir -p "$mydir"
+
+portlist="$httpdir/ports.in"
+: > "$portlist"
+
+declare -A seen
+count=0
+
+while IFS= read -r port; do
+  # trim whitespace
+  port="${port#"${port%%[![:space:]]*}"}"
+  port="${port%"${port##*[![:space:]]}"}"
+
+  [ -n "$port" ] || continue
+  [[ "$port" =~ ^[0-9]+$ ]] || continue
+  [ "$port" -ge 1 ] 2>/dev/null || continue
+  [ "$port" -le 65535 ] 2>/dev/null || continue
+
+  [ -n "${seen[$port]:-}" ] && continue
+  seen["$port"]=1
+
+  printf '%s\n' "$port" >> "$portlist"
+  count=$((count +1))
+done
+
+[ "$count" -gt 0 ] || { warn "http-validate: no candidate ports received"; exit 0; }
+
+### iterate over these ports with curl in both follow and no-follow modes
+header "Validating probable HTTP/S ports in parallel with targeted nmap scan."
+while IFS= read -r port; do
+  pdir="$mydir/$port"
+  mkdir -p -- "$pdir"
+
+  curler $port $pdir		# http no-follow
+  curler $port $pdir -s		# https no-follow
+  curler $port $pdir -L		# http follow
+  curler $port $pdir -s -L	# https follow
+
+done < "$portlist"
+
+### iterate through curl metas and find hostname-based URLs and other treasure
+

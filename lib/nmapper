@@ -15,7 +15,7 @@ nmap-disc() {
   local part1 part2 part3 pid1 pid2 pid3 discovered summary
 
   printf '\n'
-  info "${CYAN}Rapid nmap port discovery on ${BLUE}${TARGET}...${END}"
+  info "${CYAN}Rapid nmap port discovery on: ${BLUE}${TARGET}...${END}"
 
   discmap="$NMAPDIR/disc.gnmap"
   part1="$NMAPDIR/ports.p1"
