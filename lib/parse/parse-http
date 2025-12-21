@@ -1,0 +1,181 @@
+### lantern/lib/parse/parse-http
+### library for parsing HTTP results and locating treasure. produces .tsv summaries
+### author: J4CKD4W
+
+### column headers for sumamry .tsv
+cols=(
+port
+scheme
+follow
+code
+effective_url
+redirect_url
+num_redirects
+content_type
+size
+remote
+server
+location
+)
+
+tsv-init() {
+  ### produce the canonical .tsv format for http-validate
+  ### variables
+  local tsv
+  local rc
+  argserr=""
+
+  tsv="${1:-}"
+  [ -z "$tsv" ] && { argserr="parse-http: no .tsv name or path provided."; return 2; }
+  : > "$tsv" || { argserr="parse-http: Could not write to file: $tsv"; return 2; }
+  for i in "${!cols[@]}"; do
+    if [ "$i" -gt 0 ]; then printf '\t' >> "$tsv"; fi
+    printf '%s' "${cols[$i]}" >> "$tsv"
+  done
+  printf '\n' >> "$tsv"
+}
+
+meta-get() {
+  ### rummage through the .meta files and add data to the .tsv
+  argserr=""
+  local mf key
+  mf="${1:-}"
+  key="${2:-}"
+
+  ### guards
+  if [ -z "$mf" ] || [ -z "$key" ]; then
+    argserr="parse-http: meta-get <meta-file> <key>"
+    return 2
+  fi
+  if [ ! -s "$mf" ]; then
+    argserr="parse-http: meta file missing or empty: $mf"
+    return 2
+  fi
+
+  ### return values for a given key
+  val="$(tr '\t' '\n' <"$mf" | awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}')"
+
+  if [ -z "$val" ]; then
+    return 1
+  fi
+
+  printf '%s\n' "$val"
+  return 0
+}
+
+header-get() {
+  ### pull data from header files to add to the .tsv
+  argserr=""
+
+  local hf name val
+  hf="${1:-}"
+  name="${2:-}"
+
+  ## guards
+  if [ -z "$hf" ] || [ -z "$name" ]; then
+    argserr="parse-http: header-get <header-file> <Header-Name>"
+    return 2
+  fi
+  if [ ! -s "$hf" ]; then
+    argserr="parse-http: header file missing or empty: $hf"
+    return 2
+  fi
+
+  ### return values for a given key
+  val="$(awk -v want="$name" '
+    BEGIN { want = tolower(want) }
+    {
+      sub(/\r$/, "", $0)
+      idx = index($0, ":")
+      if (idx > 0) {
+        k = tolower(substr($0, 1, idx-1))
+        if (k == want) {
+          v = substr($0, idx+1)
+          sub(/^[ \t]+/, "", v)
+          sub(/[ \t]+$/, "", v)
+          print v
+          exit
+        }
+      }
+    }
+  ' "$hf")"
+
+  [ -z "$val" ] && return 1
+
+  printf '%s\n' "$val"
+  return 0
+}
+
+tsv-addrow() {
+  ### use header-get and meta-get to build the .tsv
+  ### tsv-addrow <tsv> <meta-file> <header-file>
+  argserr=""
+
+  local tsv mf hf
+  local port base scheme follow
+  local code eff red nred ctype size remote
+  local server location
+
+  tsv="${1:-}"
+  mf="${2:-}"
+  hf="${3:-}"
+
+  # guards
+  if [ -z "$tsv" ] || [ -z "$mf" ] || [ -z "$hf" ]; then
+    argserr="parse-http: tsv-addrow <tsv> <meta-file> <header-file>"
+    return 2
+  fi
+
+  [ -f "$tsv" ] || { argserr="parse-http: tsv missing: $tsv"; return 2; }
+  [ -s "$mf" ]  || { argserr="parse-http: meta missing/empty: $mf"; return 2; }
+  if [ ! -s "$hf" ]; then
+    hf=""   # mark as absent; header-get will be skipped
+  fi
+  # derive port/scheme/follow from meta filename/path
+  port="$(basename "$(dirname "$mf")")"
+  case "$port" in
+    ''|*[!0-9]*)
+      argserr="parse-http: could not derive numeric port from meta path: $mf"
+      return 2
+      ;;
+  esac
+
+  base="$(basename "$mf" .meta)"   # e.g. http.nofollow
+  scheme="${base%%.*}"             # http
+  follow="${base#*.}"              # nofollow
+
+  # meta fields (missing keys => empty)
+  code="$(meta-get "$mf" http_code)"        || code=""
+  eff="$(meta-get "$mf" url_effective)"     || eff=""
+  red="$(meta-get "$mf" redirect_url)"      || red=""
+  nred="$(meta-get "$mf" num_redirects)"    || nred=""
+  ctype="$(meta-get "$mf" content_type)"    || ctype=""
+  size="$(meta-get "$mf" size)"             || size=""
+  remote="$(meta-get "$mf" remote)"         || remote=""
+
+  # header fields (missing => empty)
+  server="$(header-get "$hf" Server)"       || server=""
+  location="$(header-get "$hf" Location)"   || location=""
+  if [ -n "$hf" ]; then
+    server="$(header-get "$hf" Server)"     || server=""
+    location="$(header-get "$hf" Location)" || location=""
+  fi
+
+  # normalize a few fields on total failure
+  if [ "$code" = "000" ]; then
+    remote=""
+    ctype=""
+    size=""
+    red=""
+    nred="0"
+    # remote already handled above
+  fi
+
+  # append TSV row (order must match your header)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$port" "$scheme" "$follow" \
+    "$code" "$eff" "$red" "$nred" "$ctype" "$size" "$remote" "$server" "$location" \
+    >> "$tsv" || { argserr="parse-http: could not append row to: $tsv"; return 2; }
+
+  return 0
+}

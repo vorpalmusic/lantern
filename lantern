@@ -67,7 +67,6 @@ info "${PURPLE}lantern config file is at: ${BLUE}${CONFIG}${END}"
 ### FINALLY, LFG!
 nmap-disc || exit 2
 nmap-services
-nmap-check
 
 ### Start targeted nmap based on discovery scan
 nmap-targeted & nmappid=$!

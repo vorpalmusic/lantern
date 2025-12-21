@@ -5,6 +5,7 @@
 
 . "$ROOTDIR/lib/messages"
 . "$ROOTDIR/lib/webber"
+. "$ROOTDIR/lib/parse/parse-http"
 
 # require ports on stdin (nmap-check | http-early ...)
 if [ -t 0 ]; then
@@ -55,5 +56,13 @@ while IFS= read -r port; do
 
 done < "$portlist"
 
-### iterate through curl metas and find hostname-based URLs and other treasure
+### use lib/parse-http to create summary and find treasure in it
+## create validate.tsv
+tsv="$httpdir/validate.tsv"
+tsv-init "$tsv" || { warn "$(tab 2)" "$argserr"; return 1; }
+for mf in "$httpdir"/validate/*/*.meta; do
+  hf="${mf%.meta}.header"
+  tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
+done
+
 

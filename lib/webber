@@ -18,15 +18,48 @@ mkhttpdir() {
 ### path:	default /	(-p "path")
 curler() {
   ### argument variables
-  scheme="http"
-  follow=""
-  host=""
-  path="/"
+  local scheme="http"
+  local follow=""
+  local host=""
+  local path="/"
+  local rc
   argserr=""
-  ### handle all arguments and flags
-  port="$1"; shift
-  prefix="$1"; shift
-  
+  ### handle all positional arguments and flags
+  local port="${1:-}"
+  local prefix="${2:-}"
+  if [ -z "$port" ] || [ -z "$prefix" ]; then
+    argserr="Webber: Usage: curler <port> <path-prefix> [-s] [-L] [-h <hostname>] [-p <path>]"
+    return 2
+  fi
+  shift 2
+
+  ### lightweight sanity on port
+  case "$port" in
+    ''|*[!0-9]*)
+      argserr="Webber: Invalid port: '$port' (expected numeric)"
+      return 2
+      ;;
+  esac
+
+  ### ensure prefix dir exists (prevents silent redirect failures)
+  mkdir -p -- "$prefix" 2>/dev/null || {
+    argserr="Webber: Could not locate directory: $prefix"
+    return 2
+  }
+
+  ### lightweight sanity on port
+  case "$port" in
+    ''|*[!0-9]*)
+      argserr="Webber: Invalid port: '$port' (expected numeric)"
+      return 2
+      ;;
+  esac
+
+  ### ensure prefix dir exists (prevents silent redirect failures)
+  mkdir -p -- "$prefix" 2>/dev/null || {
+    argserr="Webber: Could not create prefix dir: $prefix"
+    return 2
+  }  
   ### process all optional arguments
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -78,7 +111,7 @@ curler() {
   : > "$header"; : > "$body"; : > "$error"; : > "$meta"
 
   ### begin curl
-  k=""
+  local k=""
   [ "$scheme" = "https" ] && k="-k"
   curl $k $follow -sS \
     --connect-timeout 4 \
@@ -91,4 +124,7 @@ curler() {
     1>>"$meta" 2>>"$error"
 
   rc=$?
+  [ -z "$argserr" ] && rm -f -- "$error"	# delete 'error' artifacts on no errors
+  [ -z "$header" ] && rm -f -- "$header"	# delete empty headers
+  return "$rc"
 }
