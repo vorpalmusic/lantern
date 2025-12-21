@@ -1,0 +1,153 @@
+#!/bin/bash
+### lantern/scripts/add-hosts
+### read canonical.tsv, enforce hostname->IP mappings in /etc/hosts
+### author: J4CKD4W
+
+. "$ROOTDIR/lib/messages"
+
+canon="${1:-}"
+hostsfile="/etc/hosts"
+
+if [ -z "$canon" ]; then
+  warn "$(tab 1)" "add-hosts: Usage: add-hosts <FILE.TSV>"
+  exit 2
+fi
+
+if [ ! -f "$canon" ]; then
+  warn "$(tab 1)" "add-hosts: file not found: $canon"
+  exit 2
+fi
+
+pairs="$(mktemp)" || { warn "$(tab 1)" "add-hosts: mktemp failed"; exit 1; }
+: > "$pairs"
+
+# canonical.tsv (current): port scheme url host addressing remote
+awk -F'\t' '
+  function get_ip(r,   x) { split(r, x, ":"); return x[1] }
+
+  NF>=6 {
+    host=$4
+    mode=$5
+    remote=$6
+
+    if (mode != "hostname") next
+
+    ip = get_ip(remote)
+
+    if (host=="" || ip=="") next
+    if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
+
+    print host "\t" ip
+  }
+' "$canon" | sort -u > "$pairs"
+
+if [ ! -s "$pairs" ]; then
+  warn "$(tab 1)" "add-hosts: no hostname entries found in provided file: ${canon}"
+  rm -f "$pairs"
+  exit 0
+fi
+
+header "Updating /etc/hosts from discovered hostnames"
+
+# ---- Phase 1: classify + print messages (ADD / UPDATE / OK) ----
+added=0
+updated=0
+ok=0
+
+while IFS=$'\t' read -r host want; do
+  [ -n "$host" ] || continue
+  [ -n "$want" ] || continue
+
+  # find current IP for this host (first matching non-comment line)
+  cur="$(
+    awk -v h="$host" '
+      /^[ \t]*#/ || /^[ \t]*$/ { next }
+      {
+        for (i=2; i<=NF; i++) {
+          if ($i == h) { print $1; exit }
+        }
+      }
+    ' "$hostsfile"
+  )"
+
+  if [ -z "$cur" ]; then
+    info "$(tab 1)" "${GREEN}added:    ${BLUE}$host${END} -> ${CYAN}$want${END}"
+    added=$((added+1))
+  elif [ "$cur" != "$want" ]; then
+    info "$(tab 1)" "${PURPLE}updated: ${BLUE}$host${END} ${CYAN}$cur${END} -> ${CYAN}$want${END}"
+    updated=$((updated+1))
+  else
+    info "$(tab 1)" "${PURPLE}Already present:     ${BLUE}$host${END} -> ${CYAN}$want${END}"
+    ok=$((ok+1))
+  fi
+done < "$pairs"
+
+# If nothing to do, exit early (optional, but nice)
+if [ "$added" -eq 0 ] && [ "$updated" -eq 0 ]; then
+  info "$(tab 1)" "${PURPLE}/etc/hosts already correct. No changes needed${END}"
+  rm -f "$pairs"
+  exit 0
+fi
+
+# ---- Phase 2: rewrite /etc/hosts exactly as before ----
+tmp="$(mktemp)" || { warn "$(tab 1)" "add-hosts: mktemp failed"; rm -f "$pairs"; exit 1; }
+
+awk -v mapfile="$pairs" '
+  BEGIN {
+    while ((getline line < mapfile) > 0) {
+      split(line, a, "\t")
+      h=a[1]; ip=a[2]
+      if (h=="" || ip=="") continue
+      wantip[h]=ip
+      ips[ip]=1
+      if (hostlist[ip] == "") hostlist[ip]=h
+      else hostlist[ip]=hostlist[ip] " " h
+    }
+    close(mapfile)
+  }
+
+  /^[ \t]*#/ || /^[ \t]*$/ { print; next }
+
+  {
+    newip=""
+    for (i=2; i<=NF; i++) {
+      h=$i
+      if (h in wantip) {
+        present[h]=1
+        newip = wantip[h]
+      }
+    }
+
+    if (newip != "") {
+      $1 = newip
+      print $0
+      next
+    }
+
+    print $0
+  }
+
+  END {
+    for (ip in ips) {
+      out=""
+      n = split(hostlist[ip], hs, /[ ]+/)
+      for (i=1; i<=n; i++) {
+        h=hs[i]
+        if (h=="") continue
+        if (!(h in present)) {
+          if (out=="") out=h
+          else out=out " " h
+        }
+      }
+      if (out != "") {
+        print ip "\t" out
+      }
+    }
+  }
+' "$hostsfile" > "$tmp"
+
+rm -f "$tmp" "$pairs"
+
+# ---- Summary ----
+info "$(tab 1)" "${PURPLE}summary: added=${BLUE}$added ${PURPLE}updated=${BLUE}$updated ${PURPLE}ok=${BLUE}$ok${END}"
+exit 0

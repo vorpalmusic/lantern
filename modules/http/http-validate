@@ -49,20 +49,96 @@ while IFS= read -r port; do
   pdir="$mydir/$port"
   mkdir -p -- "$pdir"
 
-  curler $port $pdir		# http no-follow
-  curler $port $pdir -s		# https no-follow
-  curler $port $pdir -L		# http follow
-  curler $port $pdir -s -L	# https follow
+  curler "$port" "$pdir"		# http no-follow
+  curler "$port" "$pdir" -s		# https no-follow
+  curler "$port" "$pdir" -L		# http follow
+  curler "$port" "$pdir" -s -L		# https follow
 
 done < "$portlist"
 
 ### use lib/parse-http to create summary and find treasure in it
 ## create validate.tsv
 tsv="$httpdir/validate.tsv"
-tsv-init "$tsv" || { warn "$(tab 2)" "$argserr"; return 1; }
+tsv-init "$tsv" || { warn "$(tab 2)" "$argserr"; exit 1; }
 for mf in "$httpdir"/validate/*/*.meta; do
   hf="${mf%.meta}.header"
   tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
 done
+### we now have a beautiful summarized http validation report (validate.tsv)
 
+### Let's derive canonical web services and base URLs
+canon="$httpdir/canonical.tsv"
+awk -F'\t' '
+  NR==1 { next }
+  $4=="000" { next }
 
+  {
+    port   = $1
+    scheme = $2
+    follow = $3
+    code   = $4
+
+    effective = $5
+    remote = $10
+    location  = $12
+    base = (location != "" ? location : effective)
+
+    score = 0
+    if (code == "200" || code == "204")           score = 300
+    else if (code == "401" || code == "403")      score = 250
+    else if (code ~ /^3[0-9][0-9]$/)              score = 200
+    else                                          score = 100
+
+    if (follow == "follow") score += 10
+
+    key = port "\t" scheme
+
+    if (!(key in best_score) || score > best_score[key]) {
+      best_score[key]  = score
+      best_remote[key] = remote
+      best_url[key]    = base
+      best_code[key]   = code
+      best_follow[key] = follow
+    }
+  }
+
+  END {
+    for (k in best_url) {
+      split(k, a, "\t")
+      port = a[1]
+      scheme = a[2]
+      url = best_url[k]
+
+      host = url
+      sub(/^https?:\/\//, "", host)
+      sub(/[\/:].*$/, "", host)
+
+      if (host ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/)
+        addressing = "ip"
+      else
+        addressing = "hostname"
+
+      print port "\t" scheme "\t" url "\t" host "\t" addressing "\t" best_remote[k]
+    }
+  }
+' "$tsv" | sort -t $'\t' -k1,1n -k2,2 > "$canon"
+
+### report on "canonical" URLs we discovered
+if [ ! -s "$canon" ]; then
+  warn "http-validate: no HTTP(S) services validated (no non-000 responses)"
+else
+  header "HTTP validation results (canonical entrypoints)"
+  while IFS=$'\t' read -r port scheme url host addressing remote; do
+    if [ "$addressing" = "hostname" ]; then
+      info "$(tab 1)" "${PURPLE}Hostname detected on: ${BLUE}${port}/${scheme}${END}"
+      info "$(tab 2)" "${PURPLE}Canonical base URL: ${BLUE}$url${END}"
+      info "$(tab 2)" "${PURPLE}Connected endpoint: ${BLUE}$remote${END}"
+    else
+      info "$(tab 1)" "${PURPLE}HTTP service on: ${BLUE}${port}/${scheme}${END}"
+      info "$(tab 2)" "${PURPLE}Canonical base URL: ${BLUE}$url${END}"
+      info "$(tab 2)" "${PURPLE}Connected endpoint: ${BLUE}$remote${END}"
+    fi
+  done < "$canon"
+fi
+
+$ROOTDIR/scripts/add-hosts "$canon"
