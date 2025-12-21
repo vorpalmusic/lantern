@@ -146,6 +146,13 @@ awk -v mapfile="$pairs" '
   }
 ' "$hostsfile" > "$tmp"
 
+# write back (silent on success)
+if ! sudo cp -f "$tmp" "$hostsfile"; then
+  warn "$(tab 1)" "failed to write $hostsfile"
+  rm -f "$tmp" "$pairs"
+  exit 1
+fi
+
 rm -f "$tmp" "$pairs"
 
 # ---- Summary ----
