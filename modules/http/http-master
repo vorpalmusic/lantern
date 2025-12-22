@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+### lantern/modules/http/http-master
+### iteratively deepening web scanning and enumeration, fed by base URLs from http-validate
+### author: J4CKD4W
+
+. "$ROOTDIR/lib/messages"
+
+http-master() {
+  local httpdir canon
+  local wl
+  local failflag=0
+
+  httpdir="$BASEDIR/$TARGET/http"
+  canon="$httpdir/canonical.tsv"
+
+  # canonical must exist and be non-empty
+  if [ ! -s "$canon" ]; then
+    fail "http-master: canonical.tsv missing/empty: $canon"
+    return 2
+  fi
+
+  # wordlist
+  wl="/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt"
+  if [ ! -s "$wl" ]; then
+    fail "http-master: requires seclists wordlist: $wl"
+    return 2
+  fi
+
+  header "http-master: Beginning web enumeration in earnest..."
+  status "$(tab 1)" "http-master: phase 0 - vhost discovery ...this takes VERY long"
+
+  # Read canonical.tsv (tab-separated):
+  # PORT  SCHEME  URL  HOST  ADDR_TYPE  IPPORT
+  while IFS=$'\t' read -r port scheme url host atype ipport; do
+    # Skip empty/malformed lines
+    [ -n "${port:-}" ]   || continue
+    [ -n "${scheme:-}" ] || continue
+    [ -n "${host:-}" ]   || continue
+    [ -n "${ipport:-}" ] || continue
+
+    # Per-port output dir (stable paths)
+    local outdir vcsv
+    outdir="$httpdir/$port"
+    mkdir -p -- "$outdir"
+
+    vcsv="$outdir/vhosts.csv"
+
+    info "$(tab 2)" "${PURPLE}vhost-scan: ${BLUE}$scheme://$ipport/ ${PURPLE}(base host: ${BLUE}$host)${END}"
+
+    # ffuf vhost scan (auto-calibration)
+    # Note: output is CSV even if you name it .csv; keep it honest
+    ffuf -ac -w "$wl" \
+      -u "${scheme}://${ipport}/" \
+      -H "Host: FUZZ.${host}" \
+      -mc 200,301,302,403 \
+      -t 20 \
+      -of csv -o "$vcsv" >/dev/null 2>&1
+
+    # ffuf CSV has a header line; if it’s only 1 line, it found nothing
+    if [ ! -s "$vcsv" ] || [ "$(wc -l < "$vcsv")" -le 1 ]; then
+      warn "$(tab 3)" "vhost-scan: no vhosts (or blocked); keeping base host only."
+      continue
+    fi
+
+    treasure "$(tab 3)" "vhost-scan: candidates saved: $vcsv"
+
+    # OPTIONAL: normalize discovered vhosts into a simple list for later phases
+    # Extract the "input" column (the fuzz word) from ffuf CSV.
+    # This is robust enough for ffuf's standard CSV schema.
+    awk -F',' 'NR==1{for(i=1;i<=NF;i++) if($i=="input"){col=i}; next}
+              col{gsub(/^[ \t"]+|[ \t"]+$/,"",$col); if($col!="") print $col}' \
+      "$vcsv" | sort -u >"$outdir/vhosts.txt"
+
+  done < "$canon"
+
+  return "$failflag"
+}
+
+http-master

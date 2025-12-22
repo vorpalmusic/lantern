@@ -142,3 +142,6 @@ else
 fi
 
 $ROOTDIR/scripts/add-hosts "$canon"
+
+### call http-master for real enumeration on the "canonical" web addresses
+$ROOTDIR/modules/http/http-master
