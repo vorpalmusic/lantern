@@ -51,6 +51,7 @@ mkdir -p "$OUTDIR"
 ### now source libraries that depend on TARGET being set
 . "$LIBDIR/nmapper"
 . "$LIBDIR/parse/parse-nmap"
+. "$LIBDIR/parse/parse-http-targ"
 
 ### CHECK WHETHER THIS IS FIRST RUN AND DEPENDENCIES WERE ALREADY CHECKED
 if [ "$INIT" -eq 1 ] || [ "$DEPCHECK" -eq 0 ]; then
@@ -68,11 +69,28 @@ info "${PURPLE}lantern config file is at: ${BLUE}${CONFIG}${END}"
 nmap-disc || exit 2
 nmap-services
 
-### Start targeted nmap based on discovery scan
-nmap-targeted & nmappid=$!
-
-### time to launch early service modules in parallel with targeted scan
+### Launch early HTTP validation in parallel with targeted scan
 nmap-check | "$MODDIR/http/http-validate" & checkid=$!
 
-### wait for targeted scan to produce its artifacts before running full service modules
-wait "$nmappid" "$checkid"
+### Start targeted nmap based on discovery scan (chunked; streams HTTP candidates internally)
+nmap-targeted & nmappid=$!
+
+### Wait safely (only wait on real PIDs)
+pids=()
+[[ "${nmappid:-}" =~ ^[0-9]+$ ]] && pids+=("$nmappid")
+[[ "${checkid:-}" =~ ^[0-9]+$ ]] && pids+=("$checkid")
+
+if [ "${#pids[@]}" -gt 0 ]; then
+  wait "${pids[@]}"
+else
+  warn "$(tab 1)" "Nothing to wait on (nmappid/checkid missing)."
+fi
+
+### If early canonical exists, update /etc/hosts then run http-master once
+canon="$OUTDIR/http/canonical.tsv"
+if [ -s "$canon" ]; then
+  "$ROOTDIR/scripts/add-hosts" "$canon"
+  "$ROOTDIR/modules/http/http-master"
+else
+  warn "$(tab 1)" "No canonical.tsv found; skipping http-master."
+fi

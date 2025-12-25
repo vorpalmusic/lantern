@@ -42,7 +42,7 @@ awk -F'\t' '
 ' "$canon" | sort -u > "$pairs"
 
 if [ ! -s "$pairs" ]; then
-  warn "$(tab 1)" "add-hosts: no hostname entries found in provided file: ${canon}"
+  info "$(tab 1)" "${PURPLE}add-hosts: no hostname entries found in provided file: ${BLUE}${canon}${END}"
   rm -f "$pairs"
   exit 0
 fi

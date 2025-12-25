@@ -1,0 +1,59 @@
+### lantern/lib/parse/parse-http-targ
+### parse targeted nmap XML for probable HTTP(S) ports (STRICT)
+### author: J4CKD4W
+
+targ-http-ports() {
+  argserr=""
+  local xml="${1:-}"
+
+  [ -n "$xml" ] || { argserr="parse-http-targ: targ-http-ports <targeted.xml>"; return 2; }
+  [ -s "$xml" ] || { argserr="parse-http-targ: xml missing/empty: $xml"; return 2; }
+
+  # Parse per </port> record so we can match evidence across multiple lines.
+  awk '
+    BEGIN { RS="</port>"; IGNORECASE=1 }
+
+    # Extract first match group for portid="NNNN"
+    function portid(rec,   m) {
+      if (match(rec, /portid="[0-9]+"/)) {
+        m = substr(rec, RSTART, RLENGTH)
+        sub(/portid="/, "", m)
+        sub(/"$/, "", m)
+        return m
+      }
+      return ""
+    }
+
+    {
+      rec = $0
+
+      # only tcp ports
+      if (rec !~ /<port[[:space:]][^>]*protocol="tcp"/) next
+
+      p = portid(rec)
+      if (p == "") next
+
+      # must be open
+      if (rec !~ /<state[[:space:]][^>]*state="open"/) next
+
+      # Strong HTTP signals inside this port record:
+      # 1) service name includes http/https/http-alt or common ssl/http style labels
+      if (rec ~ /<service[[:space:]][^>]*name="[^"]*http[^"]*"/) { print p; next }
+
+      # 2) any http-* NSE script ids
+      if (rec ~ /<script[[:space:]][^>]*id="http-/) { print p; next }
+
+      # 3) TLS + HTTP-ish scripts sometimes show up (optional, but still HTTPish)
+      #    (leave this out if you want strictly http scripts only)
+      if (rec ~ /<script[[:space:]][^>]*id="(ssl-cert|tls-alpn|tls-nextprotoneg)"/ && rec ~ /http/) { print p; next }
+
+      # 4) product/extrainfo fingerprints that clearly indicate web stacks
+      #    (this is often what you see in full targeted.xml)
+      if (rec ~ /product="[^"]*(nginx|apache|httpd|jetty|tomcat|caddy|lighttpd|iis|kestrel|asp\.net|gunicorn|werkzeug|uvicorn|express|node\.js|traefik|haproxy|envoy|http)[^"]*"/) { print p; next }
+      if (rec ~ /extrainfo="[^"]*(nginx|apache|httpd|jetty|tomcat|caddy|lighttpd|iis|kestrel|asp\.net|gunicorn|werkzeug|uvicorn|express|node\.js|traefik|haproxy|envoy|http)[^"]*"/) { print p; next }
+
+      # 5) sometimes the word HTTP appears in script output without http-* id (rare)
+      if (rec ~ /HTTP\/[0-9]\.[0-9]/) { print p; next }
+    }
+  ' "$xml" | sort -n -u
+}

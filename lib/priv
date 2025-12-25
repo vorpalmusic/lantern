@@ -5,19 +5,34 @@
 SPID=""
 
 sinit() {
-  command -v sudo >/dev/null 2>&1 || exit 1
+  command -v sudo >/dev/null 2>&1 || { echo "sudo missing" >&2; exit 1; }
 
-  # prompt once up-front
-  sudo -v || exit 1
+  # prompt once up-front (interactive)
+  sudo -v || { echo "sudo auth failed" >&2; exit 1; }
 
-  # keep sudo alive
+  # keep sudo alive (non-interactive refresh)
   ( while true; do
+      # if refresh fails, stop keeper quietly
       sudo -n -v >/dev/null 2>&1 || exit 0
-      sleep 45
+      sleep 30
     done ) &
   SPID="$!"
 
+  # if keeper didn't start, bail
+  if ! kill -0 "$SPID" 2>/dev/null; then
+    echo "sudo keeper failed to start" >&2
+    exit 1
+  fi
+
   trap 'scleanup' EXIT INT TERM
+}
+
+sudo-ready() {
+  # Non-interactive check: if this fails, we abort instead of prompting.
+  if ! sudo -n -v >/dev/null 2>&1; then
+    fail "sudo credentials expired (refusing to prompt mid-run). Re-run lantern to authenticate once up-front."
+    exit 1
+  fi
 }
 
 scleanup() {

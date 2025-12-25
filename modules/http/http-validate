@@ -1,31 +1,142 @@
 #!/bin/bash
 ### lantern/modules/http/http-validate
-### very early simple validation for probable web ports
+### HTTP validation for probable web ports (early + targeted modes)
 ### author: J4CKD4W
 
 . "$ROOTDIR/lib/messages"
 . "$ROOTDIR/lib/webber"
 . "$ROOTDIR/lib/parse/parse-http"
 
-# require ports on stdin (nmap-check | http-early ...)
+HTTPMODE="${HTTPMODE:-early}"   # early | targeted
+
+# require ports on stdin
 if [ -t 0 ]; then
-  fail "http-validate: expected ports on stdin (pipe nmap-check into http-validate)"
+  fail "http-validate: expected ports on stdin (pipe ports into http-validate)"
   exit 2
 fi
 
-### make directories if they don't already exist
-mkhttpdir			# makes $OUTDIR/http and assigns path to httpdir variable
-mydir="$httpdir/validate"
-mkdir -p "$mydir"
+mkhttpdir   # sets $httpdir
 
-portlist="$httpdir/ports.in"
+# mode-specific dirs/files
+if [ "$HTTPMODE" = "targeted" ]; then
+  mydir="$httpdir/targvalidate"
+  portlist="$httpdir/ports.targ.in"
+  tsv="$httpdir/httptarg.tsv"
+  lock="$httpdir/.lock.httptarg"
+else
+  mydir="$httpdir/validate"
+  portlist="$httpdir/ports.in"
+  tsv="$httpdir/validate.tsv"
+fi
+
+mkdir -p -- "$mydir"
 : > "$portlist"
 
+# ---------- helpers ----------
+
+already_early() {
+  local p="$1"
+  ls "$httpdir/validate/$p"/*.meta >/dev/null 2>&1
+}
+
+already_targeted() {
+  local p="$1"
+  ls "$httpdir/targvalidate/$p"/*.meta >/dev/null 2>&1
+}
+
+# rebuild canonical.tsv from validate.tsv + httptarg.tsv (best per port/scheme)
+canon-rebuild() {
+  local canon="$httpdir/canonical.tsv"
+  local t1="$httpdir/validate.tsv"
+  local t2="$httpdir/httptarg.tsv"
+  local -a inputs=()
+
+  [ -s "$t1" ] && inputs+=("$t1")
+  [ -s "$t2" ] && inputs+=("$t2")
+
+  if [ "${#inputs[@]}" -eq 0 ]; then
+    : > "$canon"
+    return 0
+  fi
+
+  awk -F'\t' '
+    function consider(port, scheme, follow, code, effective, remote, location,   base, score, key, origin) {
+      if (code == "000" || code == "") return
+
+      # choose base URL: prefer Location if present, else effective
+      base = (location != "" ? location : effective)
+
+      # FIX: if Location is relative (e.g. /login.php), resolve against effective host:port
+      # This prevents bogus host extraction (""), which used to fall into "hostname".
+      if (base !~ /^https?:\/\// && effective ~ /^https?:\/\//) {
+  	origin = effective
+  	sub(/^https?:\/\//, "", origin)   # strip scheme
+  	sub(/\/.*/, "", origin)           # strip path -> host[:port]
+
+  	# if it does not start with "/", make it root-relative
+  	if (base !~ /^\//) base = "/" base
+
+  	if (scheme == "https") base = "https://" origin base
+  	else base = "http://" origin base
+      }
+      score = 0
+      if (code == "200" || code == "204")           score = 300
+      else if (code == "401" || code == "403")      score = 250
+      else if (code ~ /^3[0-9][0-9]$/)              score = 200
+      else                                          score = 100
+
+      if (follow == "follow") score += 10
+
+      key = port "\t" scheme
+      if (!(key in best_score) || score > best_score[key]) {
+        best_score[key]  = score
+        best_remote[key] = remote
+        best_url[key]    = base
+      }
+    }
+
+    FNR==1 { next }  # skip headers in each TSV
+
+    {
+      port      = $1
+      scheme    = $2
+      follow    = $3
+      code      = $4
+      effective = $5
+      remote    = $10
+      location  = $12
+      consider(port, scheme, follow, code, effective, remote, location)
+    }
+
+    END {
+      for (k in best_url) {
+        split(k, a, "\t")
+        port=a[1]; scheme=a[2]; url=best_url[k]
+
+        host=url
+        sub(/^https?:\/\//, "", host)
+        sub(/[\/:].*$/, "", host)
+
+        # if host is empty, mark unknown (shouldn’t happen now, but safety)
+        if (host == "") {
+          addressing="unknown"
+        } else if (host ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+          addressing="ip"
+        } else {
+          addressing="hostname"
+        }
+
+        print port "\t" scheme "\t" url "\t" host "\t" addressing "\t" best_remote[k]
+      }
+    }
+  ' "${inputs[@]}" | sort -t $'\t' -k1,1n -k2,2 > "$canon"
+}
+
+# ---------- collect ports ----------
 declare -A seen
 count=0
 
 while IFS= read -r port; do
-  # trim whitespace
   port="${port#"${port%%[![:space:]]*}"}"
   port="${port%"${port##*[![:space:]]}"}"
 
@@ -37,111 +148,69 @@ while IFS= read -r port; do
   [ -n "${seen[$port]:-}" ] && continue
   seen["$port"]=1
 
+  if [ "$HTTPMODE" = "targeted" ]; then
+    already_early "$port" && continue
+    already_targeted "$port" && continue
+  fi
+
   printf '%s\n' "$port" >> "$portlist"
-  count=$((count +1))
+  count=$((count + 1))
 done
 
-[ "$count" -gt 0 ] || { warn "http-validate: no candidate ports received"; exit 0; }
+[ "$count" -gt 0 ] || {
+  info "$(tab 1)" "${PURPLE}http-validate:${END} ${BLUE}no candidate ports received${END}"
+  exit 0
+}
 
-### iterate over these ports with curl in both follow and no-follow modes
-header "Validating probable HTTP/S ports in parallel with targeted nmap scan."
+# ---------- curl validate ----------
+if [ "$HTTPMODE" = "targeted" ]; then
+  info "$(tab 1)" "${CYAN}Targeted HTTP validation (skipping ports already validated).${END}"
+else
+  header "Validating probable HTTP/S ports in parallel with targeted nmap scan."
+fi
+
 while IFS= read -r port; do
   pdir="$mydir/$port"
   mkdir -p -- "$pdir"
 
-  curler "$port" "$pdir"		# http no-follow
-  curler "$port" "$pdir" -s		# https no-follow
-  curler "$port" "$pdir" -L		# http follow
-  curler "$port" "$pdir" -s -L		# https follow
-
+  curler "$port" "$pdir"
+  curler "$port" "$pdir" -s
+  curler "$port" "$pdir" -L
+  curler "$port" "$pdir" -s -L
 done < "$portlist"
 
-### use lib/parse-http to create summary and find treasure in it
-## create validate.tsv
-tsv="$httpdir/validate.tsv"
+# ---------- TSV build/update ----------
+if [ "$HTTPMODE" = "targeted" ]; then
+  (
+    while ! mkdir "$lock" 2>/dev/null; do sleep 0.1; done
+
+    if [ ! -s "$tsv" ]; then
+      tsv-init "$tsv" || { rmdir "$lock"; warn "$(tab 2)" "$argserr"; exit 1; }
+    fi
+
+    while IFS= read -r port; do
+      for mf in "$mydir/$port"/*.meta; do
+        [ -s "$mf" ] || continue   # skip missing/empty meta quietly
+        hf="${mf%.meta}.header"
+        tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
+      done
+    done < "$portlist"
+
+    rmdir "$lock"
+  )
+
+  canon-rebuild
+  info "$(tab 1)" "${PURPLE}http-validate:${END} ${GREEN}http endpoints appended: $(basename "$tsv")${END}"
+  exit 0
+fi
+
+# early: rebuild validate.tsv from scratch
 tsv-init "$tsv" || { warn "$(tab 2)" "$argserr"; exit 1; }
-for mf in "$httpdir"/validate/*/*.meta; do
+for mf in "$mydir"/*/*.meta; do
+  [ -s "$mf" ] || continue   # skip missing/empty meta quietly
   hf="${mf%.meta}.header"
   tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
 done
-### we now have a beautiful summarized http validation report (validate.tsv)
 
-### Let's derive canonical web services and base URLs
-canon="$httpdir/canonical.tsv"
-awk -F'\t' '
-  NR==1 { next }
-  $4=="000" { next }
-
-  {
-    port   = $1
-    scheme = $2
-    follow = $3
-    code   = $4
-
-    effective = $5
-    remote = $10
-    location  = $12
-    base = (location != "" ? location : effective)
-
-    score = 0
-    if (code == "200" || code == "204")           score = 300
-    else if (code == "401" || code == "403")      score = 250
-    else if (code ~ /^3[0-9][0-9]$/)              score = 200
-    else                                          score = 100
-
-    if (follow == "follow") score += 10
-
-    key = port "\t" scheme
-
-    if (!(key in best_score) || score > best_score[key]) {
-      best_score[key]  = score
-      best_remote[key] = remote
-      best_url[key]    = base
-      best_code[key]   = code
-      best_follow[key] = follow
-    }
-  }
-
-  END {
-    for (k in best_url) {
-      split(k, a, "\t")
-      port = a[1]
-      scheme = a[2]
-      url = best_url[k]
-
-      host = url
-      sub(/^https?:\/\//, "", host)
-      sub(/[\/:].*$/, "", host)
-
-      if (host ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/)
-        addressing = "ip"
-      else
-        addressing = "hostname"
-
-      print port "\t" scheme "\t" url "\t" host "\t" addressing "\t" best_remote[k]
-    }
-  }
-' "$tsv" | sort -t $'\t' -k1,1n -k2,2 > "$canon"
-
-### report on "canonical" URLs we discovered
-if [ ! -s "$canon" ]; then
-  warn "http-validate: no HTTP(S) services validated (no non-000 responses)"
-else
-  header "HTTP validation results (canonical entrypoints)"
-  while IFS=$'\t' read -r port scheme url host addressing remote; do
-    if [ "$addressing" = "hostname" ]; then
-      info "$(tab 1)" "${PURPLE}Hostname detected on: ${BLUE}${port}/${scheme}${END}"
-      info "$(tab 2)" "${PURPLE}Canonical base URL: ${BLUE}$url${END}"
-      info "$(tab 2)" "${PURPLE}Connected endpoint: ${BLUE}$remote${END}"
-    else
-      info "$(tab 1)" "${PURPLE}HTTP service on: ${BLUE}${port}/${scheme}${END}"
-      info "$(tab 2)" "${PURPLE}Canonical base URL: ${BLUE}$url${END}"
-      info "$(tab 2)" "${PURPLE}Connected endpoint: ${BLUE}$remote${END}"
-    fi
-  done < "$canon"
-fi
-
-$ROOTDIR/scripts/add-hosts "$canon"
-
-### call http-master for real enumeration on the "canonical" web addresses
-$ROOTDIR/modules/http/http-master
+canon-rebuild
+exit 0

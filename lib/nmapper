@@ -71,18 +71,107 @@ nmap-disc() {
 }
 
 nmap-targeted() {
-  TARGETEDXML="$NMAPDIR/targeted.xml"
+  local chunk=20
+  local max_bg=2
+
+  local tdir listfile count total idx start end chunkports
+  local xml outfile
+  local -a ports pids
+
+  tdir="$NMAPDIR/targeted"
+  listfile="$tdir/list"
+  mkdir -p -- "$tdir" || return 2
+  : > "$listfile"
 
   if [ -z "${PORTS:-}" ]; then
     fail "$(tab 1)" "No open ports detected; skipping targeted scan."
     return 2
   fi
 
-  header "Targeted scanning on discovered ports... if there are many, this could take a while..."
-  follow "$(tab 2)" "Results will populate the web report."
+  header "Targeted scanning on discovered ports (chunked: ${chunk}/run)..."
+  follow "$(tab 2)" "As chunks finish, we harvest HTTP candidates and feed http-validate."
 
-  sudo nmap -sCV -p"$PORTS" -n -Pn --max-retries 2 --host-timeout 120s "$TARGET" \
-    -oX "$TARGETEDXML" >/dev/null 2>&1
+  # PORTS is "80,443,..." -> array ports[]
+  IFS=',' read -r -a ports <<< "$PORTS"
+  total="${#ports[@]}"
+  [ "$total" -gt 0 ] || { fail "$(tab 1)" "No ports to scan."; return 2; }
 
-  return $?
+  # local progress helper: overwrite one line
+  _nmap_prog() {
+    local done="$1" tot="$2"
+    local pct=0
+    if [ "$tot" -gt 0 ]; then
+      pct=$(( (done * 100) / tot ))
+    fi
+    info "$(tab 1)" "${PURPLE}scan progress: ${BLUE}${done}/${tot} (${pct}%)${END}"
+  }
+
+  # compute number of chunks
+  local nchunks=$(( (total + chunk - 1) / chunk ))
+  local done=0
+
+  # NOTE: we do not produce a single merged XML (that’s messy).
+  # We produce targeted-XXX.xml files and a list file.
+
+  for ((idx=0; idx<nchunks; idx++)); do
+    start=$(( idx * chunk ))
+    end=$(( start + chunk ))
+    [ "$end" -gt "$total" ] && end="$total"
+
+    # build CSV port list for this chunk
+    chunkports=""
+    local j
+    for ((j=start; j<end; j++)); do
+      if [ -n "$chunkports" ]; then
+        chunkports+=",${ports[$j]}"
+      else
+        chunkports="${ports[$j]}"
+      fi
+    done
+
+    outfile="$(printf '%s/targeted-%03d.xml' "$tdir" $((idx+1)) )"
+    printf '%s\n' "$outfile" >> "$listfile"
+
+    # run nmap for this chunk
+    # (keep it quiet like you do elsewhere)
+    sudo nmap -sCV -p"$chunkports" -n -Pn --max-retries 2 "$TARGET" \
+      -oX "$outfile" >/dev/null 2>&1
+
+    rc=$?
+    done=$((done + 1))
+    _nmap_prog "$done" "$nchunks"
+
+    if [ $rc -ne 0 ]; then
+      warn "$(tab 2)" "Targeted chunk failed (rc=$rc): ports $chunkports"
+      continue
+    fi
+
+    # Feed HTTP-ish ports from this chunk into http-validate in the background,
+    # while the next chunk starts scanning.
+    #
+    # Requires parse-http-targ to be sourced somewhere before this runs.
+    #
+    # IMPORTANT: avoid unlimited background jobs
+    while [ "${#pids[@]}" -ge "$max_bg" ]; do
+      # wait for the oldest
+      wait "${pids[0]}" 2>/dev/null || true
+      pids=("${pids[@]:1}")
+    done
+
+    ( export HTTPMODE=targeted; targ-http-ports "$outfile" | "$ROOTDIR/modules/http/http-validate" ) &
+    pids+=("$!")
+  done
+
+  # wait for any remaining http-validate runs
+  local pid
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  printf '\n'  # end the progress line cleanly
+
+  # Export a handle other modules can use if needed
+  TARGETEDXML="$tdir"
+  export TARGETEDXML
+  return 0
 }
