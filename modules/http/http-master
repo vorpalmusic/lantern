@@ -4,11 +4,17 @@
 ### author: J4CKD4W
 
 . "$ROOTDIR/lib/messages"
+. "$ROOTDIR/lib/parse/parse-whatweb"
 
 http-master() {
   local httpdir canon
-  local wl
+  local wl_vhost wl_paths
   local failflag=0
+  local ww_summary_tsv ww_summary_txt katana_all vhosts_all ffuf_paths_all
+  local hostname_count ip_count total_count
+  local have_ffuf=0 have_whatweb=0 have_katana=0
+  local DO_VHOST=0
+  local MAX_JOBS jobcount
 
   httpdir="$BASEDIR/$TARGET/http"
   canon="$httpdir/canonical.tsv"
@@ -19,59 +25,285 @@ http-master() {
     return 2
   fi
 
-  # wordlist
-  wl="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
-  if [ ! -s "$wl" ]; then
-    fail "http-master: requires seclists wordlist: $wl"
-    return 2
+  # Tool availability
+  if command -v ffuf >/dev/null 2>&1;    then have_ffuf=1;    fi
+  if command -v whatweb >/dev/null 2>&1; then have_whatweb=1; fi
+  if command -v katana >/dev/null 2>&1;  then have_katana=1;  fi
+
+  # Wordlists (can be overridden via env)
+  wl_vhost="${HTTP_VHOST_WORDLIST:-/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt}"
+  if [ ! -s "$wl_vhost" ]; then
+    wl_vhost=""
   fi
 
-  header "http-master: Beginning web enumeration in earnest..."
-  status "$(tab 1)" "http-master: phase 0 - vhost discovery ...this takes VERY long"
+  wl_paths="${HTTP_FFUF_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/common.txt}"
+  if [ ! -s "$wl_paths" ]; then
+    wl_paths=""
+  fi
 
-  # Read canonical.tsv (tab-separated):
-  # PORT  SCHEME  URL  HOST  ADDR_TYPE  IPPORT
-  while IFS=$'\t' read -r port scheme url host atype ipport; do
+  mkdir -p -- "$httpdir"
+
+  # Count hostname/ip/total endpoints from canonical
+  read -r hostname_count ip_count total_count <<EOF
+$(awk -F'\t' '
+  { total++ }
+  $5=="hostname" { host++ }
+  $5=="ip"       { ip++ }
+  END { printf "%d %d %d\n", host+0, ip+0, total+0 }
+' "$canon")
+EOF
+
+  # Decide whether vhost fuzzing is globally worth doing
+  if [ "$hostname_count" -gt 0 ] && [ "$have_ffuf" -eq 1 ] && [ -n "$wl_vhost" ]; then
+    DO_VHOST=1
+    status "$(tab 1)" "${PURPLE}http-master: vhost fuzzing enabled (${hostname_count} hostname endpoint(s)).${END}"
+  else
+    warn "$(tab 1)" "http-master: vhost fuzzing disabled (no hostnames discovered)."
+  fi
+
+  header "http-master: beginning web enumeration in earnest..."
+  status "$(tab 1)" "http-master: canonical endpoints: ${BLUE}${total_count} (hostname(s)=${hostname_count}, IP(s)=${ip_count})${END}"
+
+  # Summary / key-artifact files (reset per run)
+  ww_summary_tsv="$httpdir/whatweb-summary.tsv"
+  ww_summary_txt="$httpdir/whatweb-summary.txt"
+  katana_all="$httpdir/katana-all.txt"
+  vhosts_all="$httpdir/vhosts-all.tsv"
+  ffuf_paths_all="$httpdir/ffuf-paths-all.tsv"
+
+  printf 'port\tscheme\thost\tcode\tbase_url\n' >"$ww_summary_tsv"
+  : >"$ww_summary_txt"
+  printf 'port\tscheme\taddr_type\tipport\tbase_host\tvhost\n' >"$vhosts_all"
+  : >"$katana_all"
+  printf 'port\tscheme\tipport\tstatus\turl\n' >"$ffuf_paths_all"
+
+  # Concurrency across endpoints
+  MAX_JOBS="${HTTP_JOBS:-4}"
+  jobcount=0
+
+  # -----------------------------
+  # Per-endpoint scan pipeline
+  # -----------------------------
+  scan_one_endpoint() {
+    local port scheme url host atype ipport code
+    local outdir base_url
+    local phases=""
+
+    port="$1"
+    scheme="$2"
+    url="$3"
+    host="$4"
+    atype="$5"
+    ipport="$6"
+    code="$7"
+
+    [ -n "$code" ] || code="-"
+
+    outdir="$httpdir/$port"
+    mkdir -p -- "$outdir"
+
+    # Prefer canonical URL (may include login.php, etc.). Fallback to host:port.
+    base_url="$url"
+    if [ -z "$base_url" ]; then
+      base_url="${scheme}://${host}:${port}/"
+    fi
+
+    # Decide which phases actually run for this endpoint
+    if [ "$DO_VHOST" -eq 1 ] && [ "$atype" = "hostname" ] && [ -n "$host" ]; then
+      phases+="vhost "
+    fi
+    if [ "$have_whatweb" -eq 1 ]; then
+      phases+="whatweb "
+    fi
+    if [ "$have_katana" -eq 1 ]; then
+      phases+="katana "
+    fi
+    if [ "$have_ffuf" -eq 1 ] && [ -n "$wl_paths" ]; then
+      phases+="ffuf-paths "
+    fi
+    phases="${phases%% }"
+    [ -n "$phases" ] || phases="none"
+
+    # Single condensed banner per endpoint
+    info "$(tab 1)" "${PURPLE}http-master: ${BLUE}$base_url (${atype}-based, port=${port}, code=${code}, phases=[${phases}])${END}"
+
+    # -------------------------
+    # Phase 0: vhost discovery
+    # -------------------------
+    if [ "$DO_VHOST" -eq 1 ] && [ "$atype" = "hostname" ] && [ -n "$host" ]; then
+      local vcsv vhosts_txt
+      vcsv="$outdir/vhosts.csv"
+      vhosts_txt="$outdir/vhosts.txt"
+
+      ffuf -ac -w "$wl_vhost" \
+        -u "${scheme}://${ipport}/" \
+        -H "Host: FUZZ.${host}" \
+        -mc 200,301,302,403 \
+        -t 20 \
+        -of csv -o "$vcsv" >/dev/null 2>&1
+
+      # ffuf CSV has a header line; if it’s only 1 line, it found nothing
+      if [ ! -s "$vcsv" ] || [ "$(wc -l < "$vcsv")" -le 1 ]; then
+        info "$(tab 2)" "vhost-scan: no vhosts (or blocked); keeping base host only."
+      else
+        treasure "$(tab 2)" "vhost-scan: candidates saved: $vcsv"
+
+        # Normalize discovered vhosts into a simple list (FUZZ part only)
+        awk -F',' 'NR==1{for(i=1;i<=NF;i++) if($i=="input"){col=i}; next}
+                  col{gsub(/^[ \t"]+|[ \t"]+$/,"",$col); if($col!="") print $col}' \
+          "$vcsv" | sort -u >"$vhosts_txt"
+
+        # Append to global vhosts summary
+        if [ -s "$vhosts_txt" ]; then
+          while IFS= read -r sub; do
+            [ -n "$sub" ] || continue
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$port" "$scheme" "$atype" "$ipport" "$host" "$sub" >>"$vhosts_all"
+          done <"$vhosts_txt"
+        fi
+      fi
+    else
+      # vhost globally disabled or not hostname-based: stay quiet per-port
+      :
+    fi
+
+    # --------------------------------
+    # Phase 1: quick fingerprint (whatweb)
+    # --------------------------------
+    if [ "$have_whatweb" -eq 1 ]; then
+      local wwout
+      wwout="$outdir/whatweb.txt"
+
+      # Heavy artifact: full whatweb output per-port
+      whatweb -a 3 "$base_url" >"$wwout" 2>&1 || {
+        warn "$(tab 2)" "whatweb: error probing $base_url (see $wwout)"
+      }
+
+      # Key artifact: append short summary
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$port" "$scheme" "$host" "$code" "$base_url" >>"$ww_summary_tsv"
+
+      {
+        printf '### %s\n' "$base_url"
+        head -n 1 "$wwout" 2>/dev/null || true
+        printf '\n'
+      } >>"$ww_summary_txt"
+    else
+      warn "$(tab 2)" "whatweb not found in PATH; skipping fingerprint phase for $base_url."
+    fi
+
+    # -------------------------------------------
+    # Phase 2: crawl / endpoint discovery (katana)
+    # -------------------------------------------
+    if [ "$have_katana" -eq 1 ]; then
+      local kout
+      kout="$outdir/katana.txt"
+
+      # Heavy artifact: per-port katana crawl
+      katana -u "$base_url" -silent -no-color >"$kout" 2>&1 || {
+        warn "$(tab 2)" "katana: error crawling $base_url (see $kout)"
+      }
+
+      # Key artifact: aggregated katana URLs
+      {
+        printf '### %s\n' "$base_url"
+        cat "$kout" 2>/dev/null || true
+        printf '\n'
+      } >>"$katana_all"
+    else
+      warn "$(tab 2)" "katana not found in PATH; skipping crawl phase for $base_url."
+    fi
+
+    # -----------------------------------
+    # Phase 3: path fuzzing (ffuf dirs)
+    # -----------------------------------
+    if [ "$have_ffuf" -eq 1 ] && [ -n "$wl_paths" ]; then
+      local fcsv ftxt
+      fcsv="$outdir/ffuf-dirs.csv"
+      ftxt="$outdir/ffuf-dirs.txt"
+
+      ffuf -ac -w "$wl_paths" \
+        -u "${scheme}://${ipport}/FUZZ" \
+        -mc 200,204,301,302,307,401,403 \
+        -t 20 \
+        -of csv -o "$fcsv" >/dev/null 2>&1 || {
+        warn "$(tab 2)" "ffuf-paths: error fuzzing ${scheme}://${ipport}/FUZZ (see $fcsv)"
+      }
+
+      # If only header or empty, nothing interesting
+      if [ ! -s "$fcsv" ] || [ "$(wc -l < "$fcsv")" -le 1 ]; then
+        info "$(tab 2)" "${PURPLE}ffuf-paths: ${ORANGE}no interesting results.${END}"
+      else
+        treasure "$(tab 2)" "${PURPLE}ffuf-paths: ${BLUE}candidates saved: ${CYAN}$fcsv${END}"
+
+        # Normalize into per-port txt and global summary
+        awk -F',' '
+          NR==1{
+            for(i=1;i<=NF;i++){
+              if($i=="url") uc=i
+              if($i=="status_code") sc=i
+            }
+            next
+          }
+          uc && sc {
+            u=$uc; s=$sc
+            gsub(/^[ \t"]+|[ \t"]+$/,"",u)
+            if(u!="") print u "\t" s
+          }
+        ' "$fcsv" >"$ftxt"
+
+        if [ -s "$ftxt" ]; then
+          while IFS=$'\t' read -r u sc; do
+            [ -n "$u" ] || continue
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$port" "$scheme" "$ipport" "$sc" "$u" >>"$ffuf_paths_all"
+          done <"$ftxt"
+        fi
+      fi
+    fi
+
+  } # end scan_one_endpoint
+
+  # -----------------------------
+  # Dispatch across all endpoints
+  # -----------------------------
+  while IFS=$'\t' read -r port scheme url host atype ipport code; do
     # Skip empty/malformed lines
     [ -n "${port:-}" ]   || continue
     [ -n "${scheme:-}" ] || continue
     [ -n "${host:-}" ]   || continue
     [ -n "${ipport:-}" ] || continue
 
-    # Per-port output dir (stable paths)
-    local outdir vcsv
-    outdir="$httpdir/$port"
-    mkdir -p -- "$outdir"
+    scan_one_endpoint "$port" "$scheme" "$url" "$host" "$atype" "$ipport" "$code" &
+    jobcount=$((jobcount+1))
 
-    vcsv="$outdir/vhosts.csv"
-
-    info "$(tab 2)" "${PURPLE}vhost-scan: ${BLUE}$scheme://$ipport/ ${PURPLE}(base host: ${BLUE}$host)${END}"
-
-    # ffuf vhost scan (auto-calibration)
-    # Note: output is CSV even if you name it .csv; keep it honest
-    ffuf -ac -w "$wl" \
-      -u "${scheme}://${ipport}/" \
-      -H "Host: FUZZ.${host}" \
-      -mc 200,301,302,403 \
-      -t 20 \
-      -of csv -o "$vcsv" >/dev/null 2>&1
-
-    # ffuf CSV has a header line; if it’s only 1 line, it found nothing
-    if [ ! -s "$vcsv" ] || [ "$(wc -l < "$vcsv")" -le 1 ]; then
-      warn "$(tab 3)" "vhost-scan: no vhosts (or blocked); keeping base host only."
-      continue
+    if [ "$jobcount" -ge "$MAX_JOBS" ]; then
+      # Wait for at least one job to finish
+      wait -n 2>/dev/null || wait
+      jobcount=$((jobcount-1))
     fi
+  done <"$canon"
 
-    treasure "$(tab 3)" "vhost-scan: candidates saved: $vcsv"
+  # Wait for all remaining jobs
+  wait
 
-    # OPTIONAL: normalize discovered vhosts into a simple list for later phases
-    # Extract the "input" column (the fuzz word) from ffuf CSV.
-    # This is robust enough for ffuf's standard CSV schema.
-    awk -F',' 'NR==1{for(i=1;i<=NF;i++) if($i=="input"){col=i}; next}
-              col{gsub(/^[ \t"]+|[ \t"]+$/,"",$col); if($col!="") print $col}' \
-      "$vcsv" | sort -u >"$outdir/vhosts.txt"
+  # -----------------------------------------
+  # Phase 4: merge WhatWeb -> canonical versions.tsv
+  # -----------------------------------------
+  if [ "$have_whatweb" -eq 1 ]; then
+    local wwlist
+    wwlist="$httpdir/whatweb-files.lst"
 
-  done < "$canon"
+    find "$httpdir" -type f -name 'whatweb.txt' -size +0c > "$wwlist"
+
+    if [ -s "$wwlist" ]; then
+      info "$(tab 1)" "${PURPLE}http-master: ${CYAN}merging whatweb results into versions.tsv${END}"
+      whatweb-to-versions "$wwlist" "$OUTDIR/versions.tsv" \
+        || warn "$(tab 2)" "whatweb merge failed (versions.tsv unchanged)."
+    else
+      warn "$(tab 2)" "http-master: no whatweb.txt outputs found to merge."
+    fi
+  fi
 
   return "$failflag"
 }

@@ -54,48 +54,74 @@ canon-rebuild() {
   [ -s "$t1" ] && inputs+=("$t1")
   [ -s "$t2" ] && inputs+=("$t2")
 
+  # If nothing to work with, just create an empty canonical (no rows).
   if [ "${#inputs[@]}" -eq 0 ]; then
     : > "$canon"
     return 0
   fi
 
-  awk -F'\t' '
-    function consider(port, scheme, follow, code, effective, remote, location,   base, score, key, origin) {
-      if (code == "000" || code == "") return
+  # Build into a temp file, then sort to final canonical.tsv.
+  awk -F'\t' -v out="$canon" '
+    BEGIN {
+      OFS = "\t"
+      tmp = out ".tmp"
+    }
 
-      # choose base URL: prefer Location if present, else effective
+    # Normalize HTTP status code to 3 digits or "000" (meaning: unusable/unknown)
+    function norm_code(c) {
+      if (c ~ /^[1-5][0-9][0-9]$/) return c
+      return "000"
+    }
+
+    # Decide whether this row becomes the best for (port, scheme)
+    function consider(port, scheme, follow, code, effective, remote, location,
+                      base, score, key, origin) {
+      code = norm_code(code)
+
+      # Drop non-HTTP / failed / unparsable responses
+      if (code == "000") return
+
+      # Base URL: prefer Location if present, otherwise the effective URL
       base = (location != "" ? location : effective)
+      if (base == "") return
 
-      # FIX: if Location is relative (e.g. /login.php), resolve against effective host:port
-      # This prevents bogus host extraction (""), which used to fall into "hostname".
+      # If Location is relative, resolve it against effective host:port
       if (base !~ /^https?:\/\// && effective ~ /^https?:\/\//) {
-  	origin = effective
-  	sub(/^https?:\/\//, "", origin)   # strip scheme
-  	sub(/\/.*/, "", origin)           # strip path -> host[:port]
+        origin = effective
+        sub(/^https?:\/\//, "", origin)   # strip scheme
+        sub(/\/.*/, "", origin)           # keep host[:port]
 
-  	# if it does not start with "/", make it root-relative
-  	if (base !~ /^\//) base = "/" base
+        # Ensure relative path is rooted
+        if (base !~ /^\//) base = "/" base
 
-  	if (scheme == "https") base = "https://" origin base
-  	else base = "http://" origin base
+        base = scheme "://" origin base
       }
-      score = 0
-      if (code == "200" || code == "204")           score = 300
-      else if (code == "401" || code == "403")      score = 250
-      else if (code ~ /^3[0-9][0-9]$/)              score = 200
-      else                                          score = 100
 
-      if (follow == "follow") score += 10
+      # Scoring:
+      #  - Prefer 2xx, then 401/403, then 3xx, then generic 4xx/5xx, then everything else
+      score = 0
+      if (code ~ /^20[0-9]$/)                  score = 400
+      else if (code == "401" || code == "403") score = 350
+      else if (code ~ /^3[0-9][0-9]$/)         score = 300
+      else if (code ~ /^4[0-9][0-9]$/)         score = 200
+      else if (code ~ /^5[0-9][0-9]$/)         score = 150
+      else                                     score = 100
+
+      # Small bonus for follow=yes, so final destinations win
+      if (follow == "follow") score += 5
 
       key = port "\t" scheme
+
       if (!(key in best_score) || score > best_score[key]) {
         best_score[key]  = score
         best_remote[key] = remote
         best_url[key]    = base
+        best_code[key]   = code
       }
     }
 
-    FNR==1 { next }  # skip headers in each TSV
+    # Skip TSV headers in each validate/httptarg file
+    FNR == 1 { next }
 
     {
       port      = $1
@@ -103,40 +129,61 @@ canon-rebuild() {
       follow    = $3
       code      = $4
       effective = $5
-      remote    = $10
-      location  = $12
+
+      # Defensive: only grab these if present, avoid blowing up on short rows
+      remote    = (NF >= 10 ? $10 : "")
+      location  = (NF >= 12 ? $12 : "")
+
       consider(port, scheme, follow, code, effective, remote, location)
     }
 
     END {
+      # No header line in canonical.tsv (preserve existing behavior).
+      # Row layout:
+      #   port  scheme  url  host  addressing  remote  code
+
       for (k in best_url) {
         split(k, a, "\t")
-        port=a[1]; scheme=a[2]; url=best_url[k]
+        port   = a[1]
+        scheme = a[2]
+        url    = best_url[k]
+        code   = best_code[k]
+        remote = best_remote[k]
 
-        host=url
+        host = url
         sub(/^https?:\/\//, "", host)
         sub(/[\/:].*$/, "", host)
 
-        # if host is empty, mark unknown (shouldn’t happen now, but safety)
         if (host == "") {
-          addressing="unknown"
+          addressing = "unknown"
         } else if (host ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
-          addressing="ip"
+          addressing = "ip"
         } else {
-          addressing="hostname"
+          addressing = "hostname"
         }
 
-        print port "\t" scheme "\t" url "\t" host "\t" addressing "\t" best_remote[k]
+        print port, scheme, url, host, addressing, remote, code >> tmp
       }
     }
-  ' "${inputs[@]}" | sort -t $'\t' -k1,1n -k2,2 > "$canon"
+  ' "${inputs[@]}"
+
+  # Sort canon by port then scheme for stable, deterministic ordering
+  if [ -f "${canon}.tmp" ]; then
+    sort -t $'\t' -k1,1n -k2,2 "${canon}.tmp" > "$canon"
+    rm -f -- "${canon}.tmp"
+  else
+    # If awk produced nothing (e.g. everything was code 000), just empty canonical.
+    : > "$canon"
+  fi
 }
 
 # ---------- collect ports ----------
+
 declare -A seen
 count=0
 
 while IFS= read -r port; do
+  # strip leading/trailing whitespace
   port="${port#"${port%%[![:space:]]*}"}"
   port="${port%"${port##*[![:space:]]}"}"
 
@@ -163,6 +210,7 @@ done
 }
 
 # ---------- curl validate ----------
+
 if [ "$HTTPMODE" = "targeted" ]; then
   info "$(tab 1)" "${CYAN}Targeted HTTP validation (skipping ports already validated).${END}"
 else
@@ -179,38 +227,35 @@ while IFS= read -r port; do
   curler "$port" "$pdir" -s -L
 done < "$portlist"
 
-# ---------- TSV build/update ----------
+# ---------- TSV build/update + canonical (both modes) ----------
+
 if [ "$HTTPMODE" = "targeted" ]; then
   (
+    # serialize TSV rebuild for targeted mode
     while ! mkdir "$lock" 2>/dev/null; do sleep 0.1; done
 
-    if [ ! -s "$tsv" ]; then
-      tsv-init "$tsv" || { rmdir "$lock"; warn "$(tab 2)" "$argserr"; exit 1; }
-    fi
+    tsv-init "$tsv" || { rmdir "$lock"; warn "$(tab 2)" "$argserr"; exit 1; }
 
-    while IFS= read -r port; do
-      for mf in "$mydir/$port"/*.meta; do
-        [ -s "$mf" ] || continue   # skip missing/empty meta quietly
-        hf="${mf%.meta}.header"
-        tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
-      done
-    done < "$portlist"
+    # walk every meta under targvalidate/<port> and add rows
+    for mf in "$mydir"/*/*.meta; do
+      [ -s "$mf" ] || continue   # skip missing/empty meta quietly
+      hf="${mf%.meta}.header"
+      tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
+    done
 
     rmdir "$lock"
   )
+else
+  # early mode: rebuild validate.tsv from all validate/<port>/*.meta
+  tsv-init "$tsv" || { warn "$(tab 2)" "$argserr"; exit 1; }
 
-  canon-rebuild
-  info "$(tab 1)" "${PURPLE}http-validate:${END} ${GREEN}http endpoints appended: $(basename "$tsv")${END}"
-  exit 0
+  for mf in "$mydir"/*/*.meta; do
+    [ -s "$mf" ] || continue
+    hf="${mf%.meta}.header"
+    tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
+  done
 fi
 
-# early: rebuild validate.tsv from scratch
-tsv-init "$tsv" || { warn "$(tab 2)" "$argserr"; exit 1; }
-for mf in "$mydir"/*/*.meta; do
-  [ -s "$mf" ] || continue   # skip missing/empty meta quietly
-  hf="${mf%.meta}.header"
-  tsv-addrow "$tsv" "$mf" "$hf" || warn "$(tab 2)" "$argserr"
-done
-
 canon-rebuild
+info "$(tab 1)" "${PURPLE}http-validate:${END} ${GREEN}http endpoints rebuilt: $(basename "$tsv")${END}"
 exit 0

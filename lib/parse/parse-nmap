@@ -37,3 +37,202 @@ nmap-check() {
     fi
   done < "$in"
 }
+
+### ----------------------------
+### TARGETED XML -> versions.tsv
+### ----------------------------
+
+nmap-has-xmlstarlet() {
+  command -v xmlstarlet >/dev/null 2>&1
+}
+
+# normalize product strings a bit (keep tiny; expand later)
+nmap-norm-software() {
+  local s="${1:-}"
+
+  # trim
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+
+  case "${s,,}" in
+    "apache httpd") echo "Apache" ;;
+    "apache tomcat") echo "Tomcat" ;;
+    "microsoft iis") echo "IIS" ;;
+    *) echo "$s" ;;
+  esac
+}
+
+# nmap-versions <xml-file-or-dir> <versions.tsv>
+# - if <xml-file-or-dir> is a directory: parse all XML files inside it (deduped list)
+# - output is canonical: versions.tsv (deduped)
+nmap-versions() {
+  local in="${1:-$OUTDIR/nmap/targeted}"
+  local out="${2:-$OUTDIR/versions.tsv}"
+
+  if ! nmap-has-xmlstarlet; then
+    warn "nmap-versions: xmlstarlet not found (needed to parse nmap -oX output)."
+    return 3
+  fi
+
+  local agg tmp
+  agg="$(mktemp)" || { warn "nmap-versions: mktemp failed"; return 1; }
+  tmp="$(mktemp)" || { warn "nmap-versions: mktemp failed"; rm -f "$agg"; return 1; }
+
+  : > "$agg" || { warn "nmap-versions: cannot write temp"; rm -f "$agg" "$tmp"; return 1; }
+
+  local found=0
+
+  if [ -d "$in" ]; then
+    # Use find to avoid duplicates (targeted-001.xml matching multiple globs)
+    while IFS= read -r -d '' f; do
+      [ -s "$f" ] || continue
+      found=1
+      : > "$tmp"
+
+      if nmap-versions-xml "$f" "$tmp" >/dev/null 2>&1; then
+        cat "$tmp" >>"$agg"
+      else
+        warn "$(tab 2)" "nmap-versions: failed parsing: $f (continuing)"
+      fi
+    done < <(find "$in" -maxdepth 1 -type f -name '*.xml' -print0 2>/dev/null | sort -z)
+  else
+    [ -s "$in" ] || { warn "nmap-versions: missing/empty xml: $in"; rm -f "$agg" "$tmp"; return 2; }
+    found=1
+    if ! nmap-versions-xml "$in" "$tmp" >/dev/null 2>&1; then
+      warn "nmap-versions: failed parsing: $in"
+      rm -f "$agg" "$tmp"
+      return 4
+    fi
+    cat "$tmp" >>"$agg"
+  fi
+
+  rm -f "$tmp"
+
+  if [ "$found" -eq 0 ]; then
+    warn "nmap-versions: no readable targeted xml found in: $in"
+    rm -f "$agg"
+    return 2
+  fi
+
+  # If nothing extracted, still create empty canonical (whatweb can fill later)
+  if [ ! -s "$agg" ]; then
+    : > "$out" || true
+    rm -f "$agg"
+    return 0
+  fi
+
+  sort -u "$agg" > "$out" || { warn "nmap-versions: failed writing: $out"; rm -f "$agg"; return 1; }
+  rm -f "$agg"
+  return 0
+}
+
+nmap-has-xmlstarlet() {
+  command -v xmlstarlet >/dev/null 2>&1
+}
+
+nmap-norm-software() {
+  local s="${1:-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+
+  case "${s,,}" in
+    "apache httpd")   echo "Apache" ;;
+    "apache tomcat")  echo "Tomcat" ;;
+    "microsoft iis")  echo "IIS" ;;
+    *) echo "$s" ;;
+  esac
+}
+
+# Extract a "clean" semantic version-ish token from a messy version string.
+# Example: "8.9p1 Ubuntu 3ubuntu0.13" -> "8.9p1"
+# Keeps original string for notes.
+nmap-clean-version() {
+  local v="${1:-}"
+  # take first token that begins with a digit; fallback to first token; else empty
+  # (bash regex via awk to stay portable)
+  printf '%s\n' "$v" | awk '
+    {
+      for (i=1;i<=NF;i++) {
+        if ($i ~ /^[0-9]/) { print $i; exit }
+      }
+      if (NF>0) print $1;
+    }'
+}
+
+# nmap-versions-xml <input.xml> [output.tsv]
+# Output columns (no header):
+# host  port  proto  software  version  cpe  source  confidence  notes
+nmap-versions-xml() {
+  local in="${1:-}"
+  local out="${2:-versions.tsv}"
+
+  if [ -z "$in" ]; then
+    warn "nmap-versions-xml: usage: nmap-versions-xml <input.xml> [output.tsv]"
+    return 2
+  fi
+
+  [ -s "$in" ] || { warn "nmap-versions-xml: missing/empty xml: $in"; return 2; }
+
+  if ! nmap-has-xmlstarlet; then
+    warn "nmap-versions-xml: xmlstarlet not found (needed to parse nmap -oX output)."
+    return 3
+  fi
+
+  : > "$out" || { warn "nmap-versions-xml: cannot write: $out"; return 1; }
+
+  xmlstarlet sel -t \
+    -m '//host[status/@state="up"]' \
+      -m 'ports/port[state/@state="open"]' \
+        -v '../../address[@addrtype="ipv4"]/@addr' -o $'\t' \
+        -v '@portid' -o $'\t' \
+        -v '@protocol' -o $'\t' \
+        -v 'service/@product' -o $'\t' \
+        -v 'service/@version' -o $'\t' \
+        -v 'normalize-space((service/cpe[starts-with(., "cpe:/a:")])[1])' -o $'\t' \
+        -v 'normalize-space((service/cpe)[1])' -o $'\t' \
+        -o 'nmap' -o $'\t' \
+        -v 'service/@conf' -o $'\t' \
+        -v 'service/@name' -o $'\t' \
+        -v 'service/@tunnel' -o $'\t' \
+        -v 'service/@hostname' -o $'\t' \
+        -v 'service/@extrainfo' -o $'\n' \
+    "$in" 2>/dev/null \
+  | awk -F'\t' '
+      BEGIN { OFS="\t" }
+      {
+        host=$1; port=$2; proto=$3; product=$4; verraw=$5;
+        cpe_a=$6; cpe_any=$7; source=$8; conf=$9;
+        svcname=$10; tunnel=$11; hostname=$12; extrainfo=$13;
+
+        cpe = (cpe_a != "" ? cpe_a : cpe_any);
+        if (product=="" && cpe=="") next;
+
+        confnum = conf + 0;
+        if (verraw != "") c = "high";
+        else if (confnum >= 7) c = "high";
+        else if (product != "") c = "medium";
+        else c = "low";
+
+        notes="";
+        if (svcname!="") notes = "svc=" svcname;
+        if (tunnel!="")  notes = (notes?notes"; ":"") "tunnel=" tunnel;
+        if (hostname!="") notes = (notes?notes"; ":"") "hostname=" hostname;
+        if (extrainfo!="") notes = (notes?notes"; ":"") "x=" extrainfo;
+
+        # keep raw version in notes if it has spaces (packaging/build string)
+        if (verraw ~ /[[:space:]]/) notes = (notes?notes"; ":"") "verraw=" verraw;
+
+        print host, port, proto, product, verraw, cpe, source, c, notes;
+      }
+    ' \
+  | while IFS=$'\t' read -r host port proto product verraw cpe source confidence notes; do
+      product="$(nmap-norm-software "$product")"
+
+      # clean version token for searchsploit friendliness
+      version="$(nmap-clean-version "$verraw")"
+      # if clean version equals raw, no need to keep extra raw in notes (awk already added only when spaced)
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$host" "$port" "$proto" "$product" "$version" "$cpe" "$source" "$confidence" "$notes"
+    done \
+  | sort -u > "$out.tmp" && mv -f -- "$out.tmp" "$out"
+}

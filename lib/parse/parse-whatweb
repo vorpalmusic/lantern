@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+### lantern/lib/parse/parse-whatweb
+### parse whatweb output and merge into canonical versions.tsv
+### author: J4CKD4W
+
+# expects:
+#   - messages already sourced (warn/info/treasure/tab)
+#   - python3 optional (only for JSON logs; brief parsing does not require python)
+
+# Normalize software names to align with parse-nmap conventions
+whatweb-norm-software() {
+  local s="${1:-}"
+
+  # trim
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+
+  case "${s,,}" in
+    "apache http server"|"apache httpd"|"httpd"|"apache") echo "Apache" ;;
+    "apache-tomcat"|"apache tomcat"|"tomcat") echo "Tomcat" ;;
+    "nginx") echo "nginx" ;;
+    "microsoft-iis"|"microsoft iis"|"iis") echo "IIS" ;;
+    "openssh") echo "OpenSSH" ;;
+    *) echo "$s" ;;
+  esac
+}
+
+# ----------------------------------------
+# Parser: WhatWeb "brief-ish" output
+# ----------------------------------------
+# Accepts either:
+# - a whatweb.txt file containing lines like:
+#     http://10.0.0.1:80/ [200 OK] Apache[2.4.52], PHP[8.1.2], WordPress[6.0]
+# - OR a file containing "### url" headers + such lines (like your whatweb-summary.txt)
+#
+# Emits TSV rows schema (9 cols):
+# host  port  proto  software  version  cpe  source  confidence  notes
+whatweb-parse-brief() {
+  local in="${1:-}"
+  local out="${2:-whatweb.tsv}"
+
+  [ -s "$in" ] || { warn "whatweb-parse-brief: missing/empty input: $in"; return 2; }
+  : > "$out" || { warn "whatweb-parse-brief: cannot write: $out"; return 1; }
+
+  awk '
+    function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
+    function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
+    function trim(s){ return rtrim(ltrim(s)) }
+
+    # strip ANSI escapes (color, cursor moves)
+    function deansi(s){
+      gsub(/\033\[[0-9;?]*[ -/]*[@-~]/, "", s)
+      return s
+    }
+
+    function parse_url(u,   x,scheme,hostport,host,port) {
+      scheme="http"
+      if (u ~ /^https:\/\//) scheme="https"
+      sub(/^https?:\/\//, "", u)
+      split(u, x, "/")
+      hostport=x[1]
+      host=hostport
+      port=(scheme=="https" ? 443 : 80)
+      if (hostport ~ /:/) { split(hostport, x, ":"); host=x[1]; port=x[2] }
+      return host "\t" port "\t" scheme
+    }
+
+    # Split on commas, but NOT commas inside [...]
+    # Fills p[1..n] with tokens
+    function split_plugins(s, p,   j,c,buf,depth,n) {
+      n=0
+      buf=""
+      depth=0
+      for (j=1; j<=length(s); j++) {
+        c=substr(s,j,1)
+        if (c=="[") depth++
+        else if (c=="]" && depth>0) depth--
+        if (c=="," && depth==0) {
+          p[++n]=buf
+          buf=""
+        } else {
+          buf=buf c
+        }
+      }
+      if (trim(buf)!="") p[++n]=buf
+      return n
+    }
+
+    BEGIN { OFS="\t" }
+
+    {
+      line=deansi($0)
+      line=trim(line)
+      if (line=="" || line ~ /^### /) next
+
+      # Find URL anywhere on the line
+      if (match(line, /(https?:\/\/[^ ]+)/, m)) url=m[1]
+      else next
+
+      urlinfo=parse_url(url)
+      split(urlinfo, b, "\t")
+      host=b[1]; port=b[2]; scheme=b[3]
+
+      # Prefer after the first "]" (common format: [200 OK] plugins...)
+      # Else remove URL token and keep remainder
+      plugins=""
+      pos=index(line, "]")
+      if (pos>0) plugins=substr(line, pos+1)
+      else {
+        sub(/.*https?:\/\/[^ ]+[ ]*/, "", line)
+        plugins=line
+      }
+
+      plugins=trim(plugins)
+      if (plugins=="") next
+
+      # If the remainder looks like a whatweb error/status line, skip it entirely
+      # (prevents "execution expired" becoming a "software" entry)
+      low=tolower(plugins)
+      if (low ~ /execution expired|timed out|timeout|connection refused|connection reset|unknown error|error:/) next
+
+      n=split_plugins(plugins, p)
+
+      for (i=1;i<=n;i++) {
+        item=trim(p[i])
+        if (item=="") continue
+
+        name=item; ver=""
+
+        # Name[ver] OR Name[foo][bar] (keep first bracket content as "version-ish")
+        if (match(item, /^([^[]+)\[([^]]+)\]/, mm)) {
+          name=trim(mm[1]); ver=trim(mm[2])
+        } else {
+          name=trim(item); ver=""
+        }
+
+        lname=tolower(name)
+
+        # Skip obvious noise (match prefixes too, not just exact token)
+        if (lname ~ /^(country|ip|title|email|html5|script|charset|uncommonheaders|cookies|redirectlocation)(\[|$)/) continue
+        if (lname ~ /^(x[- ]ua[- ]compatible|httpserver)(\[|$)/) continue
+
+        # Drop anything that *is* an email address (emails belong in a separate loot file)
+        if (item ~ /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) continue
+        if (name ~ /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) continue
+
+        # Drop residual error-ish tokens that slip through
+        if (lname ~ /^(execution expired|timed out|timeout|connection refused|connection reset|unknown error|error)$/) continue
+
+        conf = (ver!="" ? "medium" : "low")
+        notes = "scheme=" scheme "; plugin=" name
+
+        # ALWAYS emit 9 fields (cpe blank for whatweb)
+        print host, port, "tcp", name, ver, "", "whatweb", conf, notes
+      }
+    }
+
+    END { }
+  ' "$in" > "$out"
+
+  [ -s "$out" ] || { warn "whatweb-parse-brief: produced no rows"; return 4; }
+  return 0
+}
+
+# ----------------------------------------
+# Parser: Many per-endpoint whatweb.txt files
+# ----------------------------------------
+# filelist contains paths to http/<port>/whatweb.txt
+whatweb-parse-files() {
+  local filelist="${1:-}"
+  local out="${2:-whatweb.tsv}"
+
+  [ -s "$filelist" ] || { warn "whatweb-parse-files: missing/empty file list: $filelist"; return 2; }
+  : > "$out" || { warn "whatweb-parse-files: cannot write: $out"; return 1; }
+
+  local any=0 f tmp
+  tmp="$(mktemp)" || { warn "whatweb-parse-files: mktemp failed"; return 1; }
+  : > "$tmp"
+
+  while IFS= read -r f; do
+    [ -s "$f" ] || continue
+    any=1
+    : > "$tmp"
+    whatweb-parse-brief "$f" "$tmp" >/dev/null 2>&1 || true
+    [ -s "$tmp" ] && cat "$tmp" >> "$out"
+  done < "$filelist"
+
+  rm -f "$tmp"
+
+  if [ "$any" -eq 0 ]; then
+    warn "whatweb-parse-files: no readable whatweb files in list"
+    return 3
+  fi
+
+  [ -s "$out" ] || { warn "whatweb-parse-files: produced no rows"; return 4; }
+  sort -u "$out" -o "$out"
+  return 0
+}
+
+# ----------------------------------------
+# Merge: whatweb.tsv -> versions.tsv
+# ----------------------------------------
+# versions.tsv schema:
+# host  port  proto  software  version  cpe  source  confidence  notes
+#
+# Rules:
+# - If versions.tsv missing: create it
+# - If new (host,port,proto,software): add
+# - If existing has empty version and whatweb provides version: upgrade version only
+# - Otherwise: keep existing (nmap wins)
+whatweb-merge-into-versions() {
+  local versions="${1:-versions.tsv}"
+  local whatwebtsv="${2:-whatweb.tsv}"
+  local tmp
+
+  [ -s "$whatwebtsv" ] || { warn "whatweb-merge: missing/empty whatweb TSV: $whatwebtsv"; return 2; }
+
+  if [ ! -f "$versions" ]; then
+    : > "$versions" || { warn "whatweb-merge: cannot create: $versions"; return 1; }
+  fi
+
+  tmp="$(mktemp)" || { warn "whatweb-merge: mktemp failed"; return 1; }
+
+  awk -F'\t' -v OFS='\t' '
+    function key(h,p,pr,sw){ return h SUBSEP p SUBSEP pr SUBSEP tolower(sw) }
+
+    NR==FNR {
+      h=$1; p=$2; pr=$3; sw=$4; v=$5
+      k=key(h,p,pr,sw)
+      have[k]=1
+      ver[k]=v
+      line[k]=$0
+      order[++n]=k
+      next
+    }
+
+    {
+      h=$1; p=$2; pr=$3; sw=$4; v=$5
+      cpe=$6; src=$7; conf=$8; notes=$9
+      k=key(h,p,pr,sw)
+
+      if (!have[k]) {
+        have[k]=2
+        ver[k]=v
+        line[k]=$0
+        order[++n]=k
+        next
+      }
+
+      # upgrade only if existing version empty
+      if (ver[k]=="" && v!="") {
+        split(line[k], f, "\t")
+        f[5]=v
+        if (f[6]=="" && cpe!="") f[6]=cpe
+        f[7]="merged"
+        if (f[8]=="high") f[8]="high"; else f[8]="medium"
+        if (f[9]!="") f[9]=f[9] "; whatweb=" notes
+        else f[9]="whatweb=" notes
+        line[k]=f[1] OFS f[2] OFS f[3] OFS f[4] OFS f[5] OFS f[6] OFS f[7] OFS f[8] OFS f[9]
+        ver[k]=v
+      }
+    }
+
+    END {
+      for (i=1;i<=n;i++) {
+        k=order[i]
+        if (k in line) print line[k]
+      }
+    }
+  ' "$versions" "$whatwebtsv" > "$tmp" && mv -f -- "$tmp" "$versions"
+}
+
+# ----------------------------------------
+# One-shot: parse whatweb input -> merge into versions.tsv
+# ----------------------------------------
+# input can be:
+# - a whatweb log file (brief-ish)
+# - OR a file list (paths to whatweb.txt files)
+whatweb-to-versions() {
+  local input="${1:-}"
+  local versions="${2:-versions.tsv}"
+  local wtmp norm
+  local before after
+
+  [ -s "$input" ] || { warn "whatweb-to-versions: missing/empty input: $input"; return 2; }
+
+  wtmp="$(mktemp)" || { warn "whatweb-to-versions: mktemp failed"; return 1; }
+
+  # If first non-empty line points to an existing file, treat input as file list
+  if awk 'NF{print; exit}' "$input" | while IFS= read -r line; do [ -f "$line" ] && exit 0; exit 1; done; then
+    whatweb-parse-files "$input" "$wtmp" || { rm -f "$wtmp"; return 3; }
+  else
+    whatweb-parse-brief "$input" "$wtmp" || { rm -f "$wtmp"; return 3; }
+  fi
+
+  # Normalize software column (col4)
+  norm="$(mktemp)" || { warn "whatweb-to-versions: mktemp failed"; rm -f "$wtmp"; return 1; }
+
+  while IFS=$'\t' read -r host port proto sw ver cpe src conf notes; do
+    sw="$(whatweb-norm-software "$sw")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$host" "$port" "$proto" "$sw" "$ver" "$cpe" "$src" "$conf" "$notes"
+  done < "$wtmp" > "$norm"
+
+  mv -f -- "$norm" "$wtmp"
+
+  before="$(sha256sum "$versions" 2>/dev/null | awk '{print $1}')"
+  whatweb-merge-into-versions "$versions" "$wtmp"
+  local rc=$?
+  after="$(sha256sum "$versions" 2>/dev/null | awk '{print $1}')"
+
+  rm -f "$wtmp"
+
+  if [ $rc -ne 0 ]; then
+    return $rc
+  fi
+
+  if [ -n "$before" ] && [ -n "$after" ] && [ "$before" = "$after" ]; then
+    info "$(tab 2)" "whatweb merge: no new software/versions (nmap likely already had them)."
+  else
+    treasure "$(tab 2)" "whatweb merge: versions.tsv updated."
+  fi
+
+  return 0
+}

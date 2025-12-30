@@ -9,7 +9,7 @@
 
 
 NMAPDIR="$OUTDIR/nmap"
-mkdir -p $NMAPDIR
+mkdir -p -- $NMAPDIR
 
 nmap-disc() {
   local part1 part2 part3 pid1 pid2 pid3 discovered summary
@@ -71,12 +71,12 @@ nmap-disc() {
 }
 
 nmap-targeted() {
-  local chunk=20
-  local max_bg=2
+  local chunk=20          # ports per scan
+  local max_bg=2          # max concurrent targeted http-validate jobs
 
-  local tdir listfile count total idx start end chunkports
-  local xml outfile
+  local tdir listfile total start end chunkports outfile rc
   local -a ports pids
+  local nscans done idx
 
   tdir="$NMAPDIR/targeted"
   listfile="$tdir/list"
@@ -88,37 +88,29 @@ nmap-targeted() {
     return 2
   fi
 
-  header "Targeted scanning on discovered ports (chunked: ${chunk}/run)..."
-  follow "$(tab 2)" "As chunks finish, we harvest HTTP candidates and feed http-validate."
+  header "Targeted scanning on discovered ports (${chunk} ports/scan)..."
+  follow "$(tab 2)" "As scans finish, we harvest HTTP candidates and feed http-validate."
 
-  # PORTS is "80,443,..." -> array ports[]
   IFS=',' read -r -a ports <<< "$PORTS"
   total="${#ports[@]}"
   [ "$total" -gt 0 ] || { fail "$(tab 1)" "No ports to scan."; return 2; }
 
-  # local progress helper: overwrite one line
-  _nmap_prog() {
-    local done="$1" tot="$2"
+  nscans=$(( (total + chunk - 1) / chunk ))
+  done=0
+
+  _progress() {
+    local d="$1" t="$2"
     local pct=0
-    if [ "$tot" -gt 0 ]; then
-      pct=$(( (done * 100) / tot ))
-    fi
-    info "$(tab 1)" "${PURPLE}scan progress: ${BLUE}${done}/${tot} (${pct}%)${END}"
+    [ "$t" -gt 0 ] && pct=$(( (d * 100 + t/2) / t ))  # rounded
+    info "$(tab 1)" "${PURPLE}scan progress:${END} ${BLUE}${d}/${t} (${pct}%)${END}"
   }
 
-  # compute number of chunks
-  local nchunks=$(( (total + chunk - 1) / chunk ))
-  local done=0
-
-  # NOTE: we do not produce a single merged XML (that’s messy).
-  # We produce targeted-XXX.xml files and a list file.
-
-  for ((idx=0; idx<nchunks; idx++)); do
+  for ((idx=0; idx<nscans; idx++)); do
     start=$(( idx * chunk ))
     end=$(( start + chunk ))
     [ "$end" -gt "$total" ] && end="$total"
 
-    # build CSV port list for this chunk
+    # build CSV port list for this scan
     chunkports=""
     local j
     for ((j=start; j<end; j++)); do
@@ -130,47 +122,57 @@ nmap-targeted() {
     done
 
     outfile="$(printf '%s/targeted-%03d.xml' "$tdir" $((idx+1)) )"
+
+    # record this scan artifact in the list file (data file write)
     printf '%s\n' "$outfile" >> "$listfile"
 
-    # run nmap for this chunk
-    # (keep it quiet like you do elsewhere)
+    # run targeted nmap for this scan
     sudo nmap -sCV -p"$chunkports" -n -Pn --max-retries 2 "$TARGET" \
       -oX "$outfile" >/dev/null 2>&1
-
     rc=$?
+
     done=$((done + 1))
-    _nmap_prog "$done" "$nchunks"
+    _progress "$done" "$nscans"
 
     if [ $rc -ne 0 ]; then
-      warn "$(tab 2)" "Targeted chunk failed (rc=$rc): ports $chunkports"
+      warn "$(tab 2)" "Targeted scan failed (rc=$rc): ports $chunkports"
       continue
     fi
 
-    # Feed HTTP-ish ports from this chunk into http-validate in the background,
-    # while the next chunk starts scanning.
-    #
-    # Requires parse-http-targ to be sourced somewhere before this runs.
-    #
-    # IMPORTANT: avoid unlimited background jobs
+    # ---- harvest HTTP candidate ports from this scan into a data file ----
+    local harv nfound
+    harv="$(printf '%s/harvested-%03d.ports' "$tdir" $((idx+1)) )"
+
+    # write/update harvest file (data file write)
+    targ-http-ports "$outfile" | awk '/^[0-9]+$/' | sort -n -u > "$harv" || true
+    nfound="$(wc -l < "$harv" 2>/dev/null || echo 0)"
+    info "$(tab 1)" "${PURPLE}data: ${BLUE}wrote ${GREEN}${nfound} entries ${PURPLE}-> ${BLUE}$(basename "$harv")${END}"
+
+    if [ "$nfound" -eq 0 ]; then
+      info "$(tab 2)" "${PURPLE}http-harvest: ${BLUE}no HTTP candidates in scan $((idx+1))${END}"
+      continue
+    fi
+
+    # throttle background validations
     while [ "${#pids[@]}" -ge "$max_bg" ]; do
-      # wait for the oldest
       wait "${pids[0]}" 2>/dev/null || true
       pids=("${pids[@]:1}")
     done
 
-    ( export HTTPMODE=targeted; targ-http-ports "$outfile" | "$ROOTDIR/modules/http/http-validate" ) &
+    # validate harvested ports (targeted mode) quietly (http-validate itself appends to httptarg.tsv)
+    (
+      export HTTPMODE=targeted
+      cat "$harv" | "$MODDIR/http/http-validate" >/dev/null 2>&1
+    ) &
     pids+=("$!")
   done
 
-  # wait for any remaining http-validate runs
+  # wait for remaining http-validate jobs
   local pid
   for pid in "${pids[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
 
-  printf '\n'  # end the progress line cleanly
-
-  # Export a handle other modules can use if needed
   TARGETEDXML="$tdir"
   export TARGETEDXML
   return 0

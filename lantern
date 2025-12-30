@@ -86,6 +86,11 @@ else
   warn "$(tab 1)" "Nothing to wait on (nmappid/checkid missing)."
 fi
 
+### Build canonical software inventory from targeted nmap
+info "$(tab 1)" "${PURPLE}Parsing targeted nmap results into ${BLUE}versions.tsv${END}"
+nmap-versions "$OUTDIR/nmap/targeted" "$OUTDIR/versions.tsv" \
+  || warn "$(tab 2)" "versions.tsv not created from nmap (continuing)."
+
 ### If early canonical exists, update /etc/hosts then run http-master once
 canon="$OUTDIR/http/canonical.tsv"
 if [ -s "$canon" ]; then
