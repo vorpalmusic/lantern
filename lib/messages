@@ -78,7 +78,7 @@ status() {
 }
 
 #	TREASURE FINDINGS, e.g. domain added to /etc/hosts, probable user names added to users.txt
-treasure() { split "$@"; out "${ind}${ORANGE}[+] ${GREEN}${txt}${END}"; }
+treasure() { split "$@"; out "${ind}${ORANGE}[${GREEN}+${ORANGE}] ${GREEN}${txt}${END}"; }
 
 #       'LIST' MESSAGES BENEATH ANY HEADER OR SUB-HEADER, usually take at least one tab
 item() { split "$@"; out "${ind}${ORANGE}[:] ${BLUE}${txt}${END}"; }

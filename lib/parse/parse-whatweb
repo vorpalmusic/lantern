@@ -316,9 +316,9 @@ whatweb-to-versions() {
   fi
 
   if [ -n "$before" ] && [ -n "$after" ] && [ "$before" = "$after" ]; then
-    info "$(tab 2)" "whatweb merge: no new software/versions (nmap likely already had them)."
+    info "$(tab 1)" "${ORANGE}whatweb merge: no new software/versions (nmap likely already had them).${END}"
   else
-    treasure "$(tab 2)" "whatweb merge: versions.tsv updated."
+    treasure "$(tab 1)" "whatweb merge: versions.tsv updated."
   fi
 
   return 0

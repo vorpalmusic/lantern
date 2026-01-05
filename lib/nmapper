@@ -58,13 +58,13 @@ nmap-disc() {
                 | cut -d'/' -f1 | sort -n -u || true)"
 
   if [ -z "$discovered" ]; then
-    fail "$(tab 2)" "No open ports discovered."
+    fail "$(tab 1)" "No open ports discovered."
     PORTS=""
     return 2
   fi
 
   summary="$(echo "$discovered" | tr '\n' ',' | sed 's/,$//')"
-  info "$(tab 2)" "${PURPLE}Open ports discovered: ${BLUE}${summary}${END}"
+  info "$(tab 1)" "${PURPLE}Open ports discovered: ${BLUE}${summary}${END}"
 
   PORTS="$(echo "$discovered" | xargs | tr ' ' ',')"
   return 0
