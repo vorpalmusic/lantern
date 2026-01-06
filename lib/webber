@@ -43,20 +43,6 @@ curler() {
 
   ### ensure prefix dir exists (prevents silent redirect failures)
   mkdir -p -- "$prefix" 2>/dev/null || {
-    argserr="Webber: Could not locate directory: $prefix"
-    return 2
-  }
-
-  ### lightweight sanity on port
-  case "$port" in
-    ''|*[!0-9]*)
-      argserr="Webber: Invalid port: '$port' (expected numeric)"
-      return 2
-      ;;
-  esac
-
-  ### ensure prefix dir exists (prevents silent redirect failures)
-  mkdir -p -- "$prefix" 2>/dev/null || {
     argserr="Webber: Could not create prefix dir: $prefix"
     return 2
   }  

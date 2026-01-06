@@ -154,11 +154,12 @@ tsv-addrow() {
   remote="$(meta-get "$mf" remote)"         || remote=""
 
   # header fields (missing => empty)
-  server="$(header-get "$hf" Server)"       || server=""
-  location="$(header-get "$hf" Location)"   || location=""
   if [ -n "$hf" ]; then
     server="$(header-get "$hf" Server)"     || server=""
     location="$(header-get "$hf" Location)" || location=""
+  else
+    server=""
+    location=""
   fi
 
   # normalize a few fields on total failure

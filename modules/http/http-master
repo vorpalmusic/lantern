@@ -72,18 +72,8 @@ http-master() {
   }
 
   # -----------------------------
-  # "Interesting" endpoint guard
-  # -----------------------------
-  is_interesting_code() {
-    # Skip obvious junk for web tooling (like 404 WinRM-ish endpoints)
-    # Tune if needed.
-    case "${1:-}" in
-      200|204|301|302|307|308|401|403) return 0 ;;
-      *) return 1 ;;
-    esac
-  }
-
   # Count hostname/ip/total endpoints from canonical
+  # -----------------------------
   read -r hostname_count ip_count total_count <<EOF
 $(awk -F'\t' '
   { total++ }
@@ -134,13 +124,21 @@ EOF
     fi
   }
 
+  endpoint_dir() {
+    # args: port host
+    printf '%s/%s/%s\n' "$httpdir" "$1" "$2"
+  }
+
+  # -----------------------------
+  # Stage helpers
+  # -----------------------------
   run_vhost_one() {
     local port scheme url host atype ipport code
     local outdir base_url
     local vcsv vhosts_txt
 
     port="$1"; scheme="$2"; url="$3"; host="$4"; atype="$5"; ipport="$6"; code="$7"
-    outdir="$httpdir/$port"
+    outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
 
@@ -156,7 +154,7 @@ EOF
     ffuf-lock
     ffuf -ac -w "$wl_vhost" \
       -u "${scheme}://${ipport}/" \
-      -H "Host: FUZZ.${host}" \
+      -H "Host: FUZZ" \
       -mc 200,301,302,403 \
       -t 20 \
       -of csv -o "$vcsv" >/dev/null 2>&1
@@ -185,17 +183,17 @@ EOF
   run_whatweb_one() {
     local port scheme url host atype ipport code
     local outdir base_url wwout wwtmp
-    local pid wpid rc killrc
+    local pid wpid rc
     local have_setsess=0 have_ionice=0 have_nice=0
 
     port="$1"; scheme="$2"; url="$3"; host="$4"; atype="$5"; ipport="$6"; code="$7"
     [ -n "$code" ] || code="-"
 
-    outdir="$httpdir/$port"
+    outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
 
-    # Guard: skip obvious junk endpoints (e.g., your 5985/404)
+    # Guard: skip obvious junk endpoints (e.g., 404)
     case "$code" in
       200|204|301|302|307|308|401|403) : ;;
       *) info "$(tab 1)" "${PURPLE}whatweb: ${ORANGE}skipping (code=${code}) $base_url${END}"; return 0 ;;
@@ -210,7 +208,7 @@ EOF
 
     wwout="$outdir/whatweb.txt"
 
-    # Write to tmpfs first to avoid VM disk / shared-folder I/O stalls
+    # Write to tmpfs first to reduce VM I/O stalls
     wwtmp="$(mktemp /dev/shm/whatweb.XXXXXX 2>/dev/null)" || wwtmp=""
     if [ -z "$wwtmp" ]; then
       wwtmp="$(mktemp "$outdir/whatweb.tmp.XXXXXX" 2>/dev/null)" || wwtmp="$wwout.tmp"
@@ -220,22 +218,18 @@ EOF
     command -v ionice >/dev/null 2>&1 && have_ionice=1
     command -v nice >/dev/null 2>&1 && have_nice=1
 
-    # Build a gentle scheduler prefix (reduces UI freeze); only if available
-    # (Does not change correctness; just makes the VM usable.)
     local prefix=()
     if [ "$have_ionice" -eq 1 ]; then prefix+=(ionice -c3); fi
     if [ "$have_nice" -eq 1 ]; then prefix+=(nice -n 10); fi
 
-    # Run whatweb in its own process group so we can kill the whole thing reliably.
     if [ "$have_setsess" -eq 1 ]; then
       setsid "${prefix[@]}" whatweb -a 1 "$base_url" >"$wwtmp" 2>&1 &
     else
-      # Fallback: still start it; we'll kill by pid (best-effort)
       "${prefix[@]}" whatweb -a 1 "$base_url" >"$wwtmp" 2>&1 &
     fi
     pid=$!
 
-    # Watchdog: after 45s TERM the process group (or pid), after 5s KILL
+    # Watchdog: 45s TERM, then 5s KILL (best-effort)
     (
       sleep 45
       if [ "$have_setsess" -eq 1 ]; then
@@ -255,18 +249,15 @@ EOF
     wait "$pid"
     rc=$?
 
-    # Stop watchdog if the job ended naturally
     kill "$wpid" 2>/dev/null || true
     wait "$wpid" 2>/dev/null || true
 
-    # Move tmp output into place (atomic-ish)
     if [ -s "$wwtmp" ]; then
-      mv -f -- "$wwtmp" "$wwout" 2>/dev/null || cp -f -- "$wwtmp" "$wwout"
+      cat "$wwtmp" >"$wwout" 2>/dev/null || : >"$wwout"
     else
-      # Ensure file exists even if empty
       : >"$wwout"
-      rm -f -- "$wwtmp" 2>/dev/null || true
     fi
+    rm -f -- "$wwtmp" 2>/dev/null || true
 
     if [ "$rc" -ne 0 ]; then
       warn "$(tab 1)" "whatweb: exit=$rc (timeout/kill/error) probing $base_url (see $wwout)"
@@ -287,7 +278,7 @@ EOF
     local outdir base_url kout
 
     port="$1"; scheme="$2"; url="$3"; host="$4"; atype="$5"; ipport="$6"; code="$7"
-    outdir="$httpdir/$port"
+    outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
 
@@ -315,7 +306,7 @@ EOF
     local outdir base_url fcsv ftxt
 
     port="$1"; scheme="$2"; url="$3"; host="$4"; atype="$5"; ipport="$6"; code="$7"
-    outdir="$httpdir/$port"
+    outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
 
@@ -330,11 +321,11 @@ EOF
 
     ffuf-lock
     ffuf -ac -w "$wl_paths" \
-      -u "${scheme}://${ipport}/FUZZ" \
+      -u "${base_url}FUZZ" \
       -mc 200,204,301,302,307,401,403 \
       -t 20 \
       -of csv -o "$fcsv" >/dev/null 2>&1 || {
-      warn "$(tab 1)" "error fuzzing ${scheme}://${ipport}/FUZZ (see $fcsv)"
+      warn "$(tab 1)" "error fuzzing ${base_url}FUZZ (see $fcsv)"
     }
     ffuf-unlock
 
@@ -373,7 +364,7 @@ EOF
   # Stage 0: vhost fuzzing (SERIAL)
   # --------------------------------
   if [ "$DO_VHOST" -eq 1 ]; then
-    info "$(tab 1)" "${CYAN}stage 0: ${BLUE}vhost fuzzing (one at a time)${END}"
+    info "$(tab 1)" "${ORANGE}stage 0: ${CYAN}vhost fuzzing (one at a time)${END}"
     while IFS=$'\t' read -r port scheme url host atype ipport code; do
       [ -n "${port:-}" ]   || continue
       [ -n "${scheme:-}" ] || continue
@@ -386,10 +377,10 @@ EOF
   # --------------------------------
   # Stage 1: whatweb (CONCURRENT)
   # --------------------------------
-  info "$(tab 1)" "${CYAN}stage 1/3: ${BLUE}whatweb fingerprinting (up to ${MAX_JOBS} concurrent)${END}"
+  info "$(tab 1)" "${ORANGE}stage 1 of 3: ${CYAN}whatweb fingerprinting (up to ${MAX_JOBS} concurrent)${END}"
   if [ "$have_whatweb" -ne 1 ]; then
     warn "$(tab 1)" "http-master: whatweb not found; stage will be skipped."
-
+  else
     jobcount=0
     while IFS=$'\t' read -r port scheme url host atype ipport code; do
       [ -n "${port:-}" ]   || continue
@@ -405,14 +396,13 @@ EOF
         jobcount=$((jobcount-1))
       fi
     done <"$canon"
-
     wait
   fi
 
   # --------------------------------
   # Stage 2: katana (SERIAL)
   # --------------------------------
-  info "$(tab 1)" "${CYAN}stage 2/3: ${BLUE}katana crawling (one at a time)${END}"
+  info "$(tab 1)" "${ORANGE}stage 2 of 3: ${CYAN}katana crawling (one at a time)${END}"
   if [ "$have_katana" -ne 1 ]; then
     warn "$(tab 1)" "http-master: katana not found; stage will be skipped."
   else
@@ -428,7 +418,7 @@ EOF
   # --------------------------------
   # Stage 3: ffuf paths (SERIAL)
   # --------------------------------
-  info "$(tab 1)" "${CYAN}stage 3/3: ${BLUE}ffuf path fuzzing (one at a time)${END}"
+  info "$(tab 1)" "${ORANGE}stage 3 of 3: ${CYAN}ffuf path fuzzing (one at a time)${END}"
   if [ "$have_ffuf" -ne 1 ] || [ -z "$wl_paths" ]; then
     warn "$(tab 1)" "http-master: ffuf or paths wordlist missing; stage will be skipped."
   else
@@ -442,7 +432,7 @@ EOF
   fi
 
   # -----------------------------------------
-  # Phase 4: merge WhatWeb -> canonical versions.tsv
+  # Phase 4: merge WhatWeb -> versions.tsv
   # -----------------------------------------
   if [ "$have_whatweb" -eq 1 ]; then
     local wwlist

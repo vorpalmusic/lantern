@@ -2,5 +2,10 @@
 # backups
 *.bak
 
+# vim swap files
+*.swp
+*.swo
+*~
+
 # qoder ai
 .qoder
