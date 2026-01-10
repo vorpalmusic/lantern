@@ -1,6 +1,7 @@
 coreutils
 curl
 bind9-dnsutils
+ffuf
 golang-go
 joomscan
 lftp
@@ -9,6 +10,7 @@ nmap
 openssl
 psmisc
 python3
+seclists
 whatweb
 wpscan
 xmlstarlet

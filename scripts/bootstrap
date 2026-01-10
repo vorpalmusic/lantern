@@ -1,74 +1,189 @@
 #!/usr/bin/env bash
-# initial run helper which ensures all dependencies are installed and can be found. initial .config settings
 # scripts/bootstrap
+# initial run helper which ensures all dependencies are installed and can be found. initial .config settings
 # author: J4CKD4W
+
+set -u
 
 # resolve project root and locate libs
 . "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)/../lib/pathfinder"
 . "$LIBDIR/messages"
 . "$LIBDIR/tform"
-. $CONFIG
 
-### IS THIS THE INITIAL RUN? ASK USER IF THEY WANT TO CREATE A GLOBAL SYMLINK IN /USR/LOCAL/BIN
-if [ "$INIT" -eq 1 ]; then
+# CONFIG comes from pathfinder in your repo; keep this load AFTER messages/tform
+. "$CONFIG"
+
+# ---------------------------
+# helpers
+# ---------------------------
+
+cfgset() {
+  # safely set KEY=VALUE in $CONFIG
+  local key="${1:-}" val="${2:-}" tmp
+  [ -z "$key" ] && return 1
+  tmp="$(mktemp)" || return 1
+
+  if grep -q "^${key}=" "$CONFIG" 2>/dev/null; then
+    sed -E "s/^${key}=.*/${key}=${val}/" "$CONFIG" > "$tmp" && mv -f "$tmp" "$CONFIG"
+  else
+    cat "$CONFIG" > "$tmp" || true
+    printf "\n%s=%s\n" "$key" "$val" >> "$tmp"
+    mv -f "$tmp" "$CONFIG"
+  fi
+}
+
+cfgline_once() {
+  # append an exact line to $CONFIG if it's not already present (exact match)
+  # usage: cfgline_once 'export PATH="$PATH:$HOME/go/bin"'
+  local line="${1:-}"
+  [ -z "$line" ] && return 1
+
+  # ensure file exists
+  [ -f "$CONFIG" ] || : > "$CONFIG"
+
+  if ! grep -Fqx "$line" "$CONFIG" 2>/dev/null; then
+    printf '\n%s\n' "$line" >> "$CONFIG"
+  fi
+}
+
+apt_known() {
+  local pkg="${1:-}"
+  apt-cache show "$pkg" >/dev/null 2>&1
+}
+
+apt_installed() {
+  local pkg="${1:-}"
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"
+}
+
+path_has() {
+  # usage: path_has "/some/dir"
+  local dir="${1:-}"
+  case ":${PATH:-}:" in
+    *":$dir:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+add_path_once() {
+  # usage: add_path_once "/some/dir"
+  local dir="${1:-}"
+  [ -z "$dir" ] && return 1
+  if ! path_has "$dir"; then
+    export PATH="${PATH:-}:$dir"
+  fi
+}
+
+gobin_dir() {
+  # echo the effective Go binary install directory
+  local gobin gopath
+  if ! command -v go >/dev/null 2>&1; then
+    return 1
+  fi
+  gobin="$(go env GOBIN 2>/dev/null || true)"
+  gopath="$(go env GOPATH 2>/dev/null || true)"
+  if [ -z "$gobin" ]; then
+    gobin="${gopath:-$HOME/go}/bin"
+  fi
+  printf '%s\n' "$gobin"
+}
+
+persist_path_line_once() {
+  # append a line to a file if it's not already present (exact match)
+  # usage: persist_path_line_once "$HOME/.zshrc" 'export PATH="$PATH:$HOME/go/bin"'
+  local f="${1:-}" line="${2:-}"
+  [ -z "$f" ] || [ -z "$line" ] && return 1
+
+  # ensure file exists
+  [ -f "$f" ] || : > "$f"
+
+  # append only if missing
+  if ! grep -Fqx "$line" "$f" 2>/dev/null; then
+    printf '\n%s\n' "$line" >> "$f"
+  fi
+}
+
+persist_gobin_into_config_and_shells() {
+  # Ensure Go bin dir is available for future Lantern runs (via .config)
+  # and optionally for interactive shells (bashrc/zshrc).
+  local gobin="${1:-}" rel
+  [ -z "$gobin" ] && return 1
+
+  if [ "$gobin" = "$HOME/go/bin" ]; then
+    cfgline_once 'export PATH="$PATH:$HOME/go/bin"'
+    persist_path_line_once "$HOME/.zshrc" 'export PATH="$PATH:$HOME/go/bin"'
+    persist_path_line_once "$HOME/.bashrc" 'export PATH="$PATH:$HOME/go/bin"'
+    return 0
+  fi
+
+  case "$gobin" in
+    "$HOME"/*)
+      rel="${gobin#"$HOME"}"
+      cfgline_once "export PATH=\"\$PATH:\$HOME${rel}\""
+      persist_path_line_once "$HOME/.zshrc" "export PATH=\"\$PATH:\$HOME${rel}\""
+      persist_path_line_once "$HOME/.bashrc" "export PATH=\"\$PATH:\$HOME${rel}\""
+      ;;
+    *)
+      cfgline_once "export PATH=\"\$PATH:${gobin}\""
+      persist_path_line_once "$HOME/.zshrc" "export PATH=\"\$PATH:${gobin}\""
+      persist_path_line_once "$HOME/.bashrc" "export PATH=\"\$PATH:${gobin}\""
+      ;;
+  esac
+
+  return 0
+}
+
+# ---------------------------
+# INITIAL RUN: optional global symlink + INIT flag
+# ---------------------------
+if [ "${INIT:-0}" -eq 1 ]; then
   header "This appears to be the first time you are running lantern. Thank you for downloading this software."
   prompt "Would you like to install lantern as a global command in /usr/local/bin? Y/n? "
 
-  ### capture input and install global symlink if user wants
-  sym=1			# default response
-
+  sym=1 # default yes
   while :; do
     read -r -n 1 reply
-    echo		# permit only one character to be pressed before moving on
-
+    echo
     case "$reply" in
-      y|Y|"")
-        sym=1
-        break
-        ;;
-      n|N)
-        sym=0
-        break
-        ;;
-      *)
-        prompt "Please enter Y or N: "
-        ;;
+      y|Y|"") sym=1; break ;;
+      n|N)    sym=0; break ;;
+      *)      prompt "Please enter Y or N: " ;;
     esac
   done
 
-  ## if yes, remove any existing global symlink and install a new one
-  if [ -f /usr/local/bin/lantern ]; then
-    sudo rm -f /usr/local/bin/lantern
-  fi
-
-  sudo ln -s "$ROOTDIR/lantern" /usr/local/bin/lantern
-  info "${PURPLE}Symlink created at /usr/local/bin/lantern. Run the command from anywhere as:" \
-  "${BLUE}'lantern [options] <target>'${END}\n"
-
-  ## Change INIT in .config to 0. Use a .tmp file replace to avoid destroying the .config by error
-  if grep -q '^INIT=' "$CONFIG"; then
-      tmp="$(mktemp)"
-      sed -E "s/^INIT=.*/INIT=0/" "$CONFIG" > "$tmp" \
-      && mv "$tmp" "$CONFIG"
+  if [ "$sym" -eq 1 ]; then
+    if [ -e /usr/local/bin/lantern ]; then
+      sudo rm -f /usr/local/bin/lantern
+    fi
+    sudo ln -sfn "$ROOTDIR/lantern" /usr/local/bin/lantern
+    info "${PURPLE}Symlink created at /usr/local/bin/lantern. Run the command from anywhere as:" \
+      "${BLUE}'lantern [options] <target>'${END}\n"
   else
-    printf '\nINIT=0\n' >> "$CONFIG"
+    info "${PURPLE}Skipping global install. You can still run lantern from: ${BLUE}$ROOTDIR/lantern${END}\n"
   fi
+
+  cfgset "INIT" "0"
 fi
 
-### Time to check for dependencies
-if [ "$DEPCHECK" -eq 0 ]; then
+# ---------------------------
+# DEP CHECK
+# ---------------------------
+if [ "${DEPCHECK:-0}" -eq 0 ]; then
   status "Validating all required dependencies..."
-  ## initialize arrays for installed, not installed and unknown packages
+
   present=()
   missing=()
   unknown=()
-  ## read requirements into an array to check them all
-  ## let's start with packages that we expect to be available in apt install
+
+  # --- APT requirements ---
   mapfile -t aptreqs < "$LISTDIR/reqs/apt"
+
   for pkg in "${aptreqs[@]}"; do
-    if dpkg-query -W "$pkg" >/dev/null 2>&1; then
-    # package is known, now check whether installed
-      if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+    [ -z "$pkg" ] && continue
+    [[ "$pkg" == \#* ]] && continue
+
+    if apt_known "$pkg"; then
+      if apt_installed "$pkg"; then
         present+=("$pkg")
       else
         missing+=("$pkg")
@@ -78,147 +193,154 @@ if [ "$DEPCHECK" -eq 0 ]; then
     fi
   done
 
-  ## now let's check go repositories (reqs/go)
+  # --- Go tools requirements ---
   gopresent=()
-  gomissing=()
+  gomissing_mods=()
+  gomissing_names=()
 
   while read -r mod; do
-    # skip empty lines
     [ -z "$mod" ] && continue
-
-    # skip comments
     [[ "$mod" == \#* ]] && continue
 
-    # derive command name from module line (last path component)
     cmd="$(basename "$mod")"
-
     if command -v "$cmd" >/dev/null 2>&1; then
       gopresent+=("$cmd")
     else
-      # store full module line so we can do: go install "$mod@latest" later
-      gomissing+=("$mod")
+      gomissing_mods+=("$mod")
+      gomissing_names+=("$cmd")
     fi
   done < "$REQSDIR/go"
 
-  ## strip any missing go installs to their basename for console output
-  gomissingnames=()
-  for mod in "${gomissing[@]}"; do
-    gomissingnames+=("$(basename "$mod")")
-  done
-
+  # --- report (initial) ---
   out "${GREEN}installed: "
-  makecols 4 25 "${present[@]}" "${gopresent[@]}"; out "${END}"
-  out "${ORANGE}missing: " 
-  if [ "${#missing[@]}" -eq 0 ] && [ "${#gomissing[@]}" -eq 0 ]; then
+  makecols 4 25 "${present[@]}" "${gopresent[@]}"; out "${END}\n"
+
+  out "${ORANGE}missing: "
+  if [ "${#missing[@]}" -eq 0 ] && [ "${#gomissing_mods[@]}" -eq 0 ]; then
     out "${GREEN}<none>\n${END}"
   else
-    makecols 4 25 "${missing[@]}" "${gomissingnames[@]}"; out "${END}\n"
+    makecols 4 25 "${missing[@]}" "${gomissing_names[@]}"; out "${END}\n"
   fi
-  out "${RED}unknown (meaning that these pacakges are not found in your distro. You will have to manually install): "
+
+  out "${RED}unknown (not found in APT on this distro; may require manual install or different package name): "
   if [ "${#unknown[@]}" -eq 0 ]; then
     out "${GREEN}<none>\n${END}"
   else
     makecols 4 25 "${unknown[@]}"; out "${END}\n"
   fi
 
-  ## any uninstalled apt dependencies?
-  fix=1
-  if ! [ "${#missing[@]}" -eq 0 ]; then
-    prompt "Would you like to install the missing dependencies Y/N? "
+  # ---------------------------
+  # Fix missing APT deps
+  # ---------------------------
+  if [ "${#missing[@]}" -ne 0 ]; then
+    prompt "Would you like to install the missing APT dependencies Y/N? "
     while :; do
       read -r -n 1 reply
-      echo                # permit only one character to be pressed before moving on
-
+      echo
       case "$reply" in
         y|Y|"")
-          fix=1
-	  sudo apt install "${missing[@]}" 2>/dev/null
-          treasure "All required packages are now installed. Booting lantern."
+          sudo apt update >/dev/null 2>&1
+          sudo apt install -y "${missing[@]}" 2>/dev/null
           break
           ;;
         n|N)
-          fix=0
-          fail "Required packages not installed. Exiting."
-	  exit 0
+          fail "Required APT packages not installed. Exiting."
+          exit 1
           ;;
-        *)
-          prompt "Please enter Y or N: "
-          ;;
+        *) prompt "Please enter Y or N: " ;;
       esac
     done
-  else
-    treasure "All required packages are already installed. Booting lantern."
   fi
 
-  # --- install missing go tools (if any) ---
-  if [ "${#gomissing[@]}" -ne 0 ]; then
+  # re-check APT deps after install attempt
+  if [ "${#missing[@]}" -ne 0 ]; then
+    newmissing=()
+    for pkg in "${missing[@]}"; do
+      if apt_installed "$pkg"; then
+        present+=("$pkg")
+      else
+        newmissing+=("$pkg")
+      fi
+    done
+    missing=("${newmissing[@]}")
+    unset newmissing
+  fi
 
-    # do we even have Go?
+  # ---------------------------
+  # Fix missing Go tools
+  # ---------------------------
+  if [ "${#gomissing_mods[@]}" -ne 0 ]; then
     if ! command -v go >/dev/null 2>&1; then
-      fail "Go is not installed (missing 'go' command). Install golang-go first."
-    else
-      prompt "Install missing Go tools now (go install ...@latest)? Y/N? "
+      fail "Go is not installed (missing 'go' command). Install 'golang-go' first."
+      exit 1
+    fi
 
-      gofix=0
-      while :; do
-        read -r -n 1 reply
-        echo
+    # ensure Go bin is on PATH for THIS run (idempotent)
+    gobin="$(gobin_dir || true)"
+    if [ -n "${gobin:-}" ]; then
+      add_path_once "$gobin"
+      # persist for future Lantern runs (via .config) + interactive shells (optional)
+      persist_gobin_into_config_and_shells "$gobin" || true
+    fi
 
-        case "$reply" in
-          y|Y|"")
-            gofix=1
-            break
-            ;;
-          n|N)
-            gofix=0
-            break
-            ;;
-          *)
-            prompt "Please enter Y or N: "
-            ;;
-        esac
+    prompt "Install missing Go tools now (go install ...@latest)? Y/N? "
+    gofix=0
+    while :; do
+      read -r -n 1 reply
+      echo
+      case "$reply" in
+        y|Y|"") gofix=1; break ;;
+        n|N)    gofix=0; break ;;
+        *)      prompt "Please enter Y or N: " ;;
+      esac
+    done
+
+    if [ "$gofix" -eq 1 ]; then
+      newgomissing_mods=()
+      for mod in "${gomissing_mods[@]}"; do
+        cmd="$(basename "$mod")"
+        info "${PURPLE}go install ${BLUE}${mod}@latest${END}"
+        go install "${mod}@latest" 2>/dev/null
+
+        # re-check (now that PATH includes gobin)
+        if command -v "$cmd" >/dev/null 2>&1; then
+          gopresent+=("$cmd")
+        else
+          newgomissing_mods+=("$mod")
+        fi
       done
 
-      if [ "$gofix" -eq 1 ]; then
-        # attempt installs
-        for mod in "${gomissing[@]}"; do
-          cmd="$(basename "$mod")"
-          info "go install ${mod}@latest"
-          go install "${mod}@latest" 2>/dev/null
+      gomissing_mods=("${newgomissing_mods[@]}")
+      unset newgomissing_mods
 
-          # verify it is now runnable
-          if bin="$(command -v "$cmd" 2>/dev/null)"; then
-            gopresent+=("$cmd")
-            # optional: track path for later use
-            declare -p gopath >/dev/null 2>&1 || declare -A gopath=()
-            gopath["$cmd"]="$bin"
-          else
-            # keep it missing if install didn't put it on PATH
-            newgomissing+=("$mod")
-          fi
-        done
-
-        # replace gomissing with only the ones that still failed
-        if declare -p newgomissing >/dev/null 2>&1; then
-          gomissing=("${newgomissing[@]}")
-          unset newgomissing
-        else
-          gomissing=()
-        fi
-      fi
-    fi
-  fi
-  # --- end go install ---
-
-  # set DEPCHECK to 1 in .config so we don't do this again
-  if [ "$fix" -eq 1 ]; then
-    if grep -q '^DEPCHECK=0' "$CONFIG"; then
-      tmp=$(mktemp)
-      sed -E 's/^DEPCHECK=0.*/DEPCHECK=1/' "$CONFIG" > tmp \
-        &&  mv tmp "$CONFIG"
+      gomissing_names=()
+      for mod in "${gomissing_mods[@]}"; do
+        gomissing_names+=("$(basename "$mod")")
+      done
     fi
   fi
 
+  # ---------------------------
+  # Final gate: HARD requirements = APT + Go tools lists
+  # ---------------------------
+  if [ "${#missing[@]}" -eq 0 ] && [ "${#gomissing_mods[@]}" -eq 0 ]; then
+    treasure "All required dependencies are installed. Booting lantern."
+    cfgset "DEPCHECK" "1"
+    exit 0
+  fi
+
+  out "\n"
+  fail "Dependency validation failed. Lantern will not run until requirements are satisfied."
+  if [ "${#missing[@]}" -ne 0 ]; then
+    out "${ORANGE}Still missing APT:${END}\n"
+    makecols 4 25 "${missing[@]}"; out "\n"
+  fi
+  if [ "${#gomissing_mods[@]}" -ne 0 ]; then
+    out "${ORANGE}Still missing Go tools:${END}\n"
+    makecols 4 25 "${gomissing_names[@]}"; out "\n"
+    out "${DIM}If Go installs succeeded but tools aren't found, confirm Go bin is on PATH (usually \$HOME/go/bin).${END}\n"
+  fi
+  exit 1
 fi
 
 exit 0

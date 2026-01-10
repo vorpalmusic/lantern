@@ -16,6 +16,13 @@ http-master() {
   local DO_VHOST=0
   local MAX_JOBS jobcount
 
+  # whatweb escalation knobs
+  local WW_ESCALATE WW_ESCALATE_LEVEL WW_A1_TIMEOUT WW_A3_TIMEOUT
+  WW_ESCALATE="${HTTP_WHATWEB_ESCALATE:-1}"
+  WW_ESCALATE_LEVEL="${HTTP_WHATWEB_ESCALATE_LEVEL:-3}"
+  WW_A1_TIMEOUT="${HTTP_WHATWEB_A1_TIMEOUT:-45}"
+  WW_A3_TIMEOUT="${HTTP_WHATWEB_A3_TIMEOUT:-90}"
+
   httpdir="$BASEDIR/$TARGET/http"
   canon="$httpdir/canonical.tsv"
 
@@ -83,12 +90,17 @@ $(awk -F'\t' '
 ' "$canon")
 EOF
 
-  # Decide whether vhost fuzzing is globally worth doing
-  if [ "$hostname_count" -gt 0 ] && [ "$have_ffuf" -eq 1 ] && [ -n "$wl_vhost" ]; then
+  # Decide whether vhost fuzzing is globally worth doing (and WHY not)
+  DO_VHOST=0
+  if [ "$hostname_count" -le 0 ]; then
+    warn "$(tab 1)" "http-master: vhost fuzzing disabled (no hostnames discovered)."
+  elif [ "$have_ffuf" -ne 1 ]; then
+    warn "$(tab 1)" "http-master: vhost fuzzing disabled (ffuf not found in PATH)."
+  elif [ -z "$wl_vhost" ]; then
+    warn "$(tab 1)" "http-master: vhost fuzzing disabled (vhost wordlist missing/unreadable)."
+  else
     DO_VHOST=1
     status "$(tab 1)" "${PURPLE}http-master: ${BLUE}vhost fuzzing enabled: ${hostname_count} hostname(s).${END}"
-  else
-    warn "$(tab 1)" "http-master: vhost fuzzing disabled (no hostnames discovered)."
   fi
 
   header "http-master: beginning web enumeration in earnest..."
@@ -129,6 +141,85 @@ EOF
     printf '%s/%s/%s\n' "$httpdir" "$1" "$2"
   }
 
+  whatweb_should_escalate() {
+    # Decide escalation based on whatweb -a 1 output line.
+    # Args: line
+    local line="${1:-}"
+    local lc
+
+    [ "$WW_ESCALATE" -eq 1 ] || return 1
+    [ -n "$line" ] || return 1
+
+    lc="${line,,}"
+
+    # If it looks like JSON/script-only, escalation is usually wasted.
+    case "$lc" in
+      *"application/json"*|*"script[application/json]"*|*"json"* )
+        case "$lc" in
+          *"html"*|*"html5"* ) return 0 ;;
+          * ) return 1 ;;
+        esac
+        ;;
+    esac
+
+    # Escalate on common HTML markers
+    case "$lc" in
+      *"html"*|*"html5"*|*"xhtml"*|*"doctype"*|*"text/html"* )
+        return 0
+        ;;
+    esac
+
+    return 1
+  }
+
+  run_whatweb_timed() {
+    # Args: out_tmp, base_url, level, seconds
+    # Uses `timeout` when available (preferred). Falls back to a safe kill-based timeout.
+    local out_tmp="$1" base_url="$2" level="$3" seconds="$4"
+    local rc=0
+    local have_timeout=0 have_ionice=0 have_nice=0
+    local prefix=()
+
+    command -v timeout >/dev/null 2>&1 && have_timeout=1
+    command -v ionice  >/dev/null 2>&1 && have_ionice=1
+    command -v nice    >/dev/null 2>&1 && have_nice=1
+
+    if [ "$have_ionice" -eq 1 ]; then prefix+=(ionice -c3); fi
+    if [ "$have_nice"   -eq 1 ]; then prefix+=(nice -n 10); fi
+
+    # Ensure file exists
+    : >"$out_tmp" 2>/dev/null || true
+
+    if [ "$have_timeout" -eq 1 ]; then
+      # -k 5: send KILL 5s after TERM if still running
+      # --preserve-status: keep child exit status when possible
+      timeout --preserve-status -k 5 "${seconds}" \
+        "${prefix[@]}" whatweb -a "$level" "$base_url" >"$out_tmp" 2>&1
+      rc=$?
+      return "$rc"
+    fi
+
+    # Fallback: background + kill
+    local pid wpid
+    "${prefix[@]}" whatweb -a "$level" "$base_url" >"$out_tmp" 2>&1 &
+    pid=$!
+
+    (
+      sleep "$seconds"
+      kill -TERM -- "$pid" 2>/dev/null || true
+      sleep 5
+      kill -KILL -- "$pid" 2>/dev/null || true
+    ) &
+    wpid=$!
+
+    wait "$pid"; rc=$?
+
+    kill "$wpid" 2>/dev/null || true
+    wait "$wpid" 2>/dev/null || true
+
+    return "$rc"
+  }
+
   # -----------------------------
   # Stage helpers
   # -----------------------------
@@ -141,6 +232,7 @@ EOF
     outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
+    base_url="${base_url//$'\r'/}"
 
     if [ "$DO_VHOST" -ne 1 ] || [ "$atype" != "hostname" ] || [ -z "$host" ]; then
       return 0
@@ -182,9 +274,10 @@ EOF
 
   run_whatweb_one() {
     local port scheme url host atype ipport code
-    local outdir base_url wwout wwtmp
-    local pid wpid rc
-    local have_setsess=0 have_ionice=0 have_nice=0
+    local outdir base_url
+    local wwout ww_a1 ww_a3 wwtmp1 wwtmp3
+    local rc1 rc3
+    local firstline=""
 
     port="$1"; scheme="$2"; url="$3"; host="$4"; atype="$5"; ipport="$6"; code="$7"
     [ -n "$code" ] || code="-"
@@ -192,6 +285,7 @@ EOF
     outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
+    base_url="${base_url//$'\r'/}"
 
     # Guard: skip obvious junk endpoints (e.g., 404)
     case "$code" in
@@ -207,60 +301,60 @@ EOF
     fi
 
     wwout="$outdir/whatweb.txt"
+    ww_a1="$outdir/whatweb.a1.txt"
+    ww_a3="$outdir/whatweb.a3.txt"
 
-    # Write to tmpfs first to reduce VM I/O stalls
-    wwtmp="$(mktemp /dev/shm/whatweb.XXXXXX 2>/dev/null)" || wwtmp=""
-    if [ -z "$wwtmp" ]; then
-      wwtmp="$(mktemp "$outdir/whatweb.tmp.XXXXXX" 2>/dev/null)" || wwtmp="$wwout.tmp"
-    fi
+    wwtmp1="$(mktemp /dev/shm/whatweb.a1.XXXXXX 2>/dev/null)" || wwtmp1=""
+    [ -n "$wwtmp1" ] || wwtmp1="$(mktemp "$outdir/whatweb.a1.tmp.XXXXXX" 2>/dev/null)" || wwtmp1="$outdir/whatweb.a1.tmp"
 
-    command -v setsid >/dev/null 2>&1 && have_setsess=1
-    command -v ionice >/dev/null 2>&1 && have_ionice=1
-    command -v nice >/dev/null 2>&1 && have_nice=1
+    rc1=0
+    run_whatweb_timed "$wwtmp1" "$base_url" 1 "$WW_A1_TIMEOUT" || rc1=$?
 
-    local prefix=()
-    if [ "$have_ionice" -eq 1 ]; then prefix+=(ionice -c3); fi
-    if [ "$have_nice" -eq 1 ]; then prefix+=(nice -n 10); fi
-
-    if [ "$have_setsess" -eq 1 ]; then
-      setsid "${prefix[@]}" whatweb -a 1 "$base_url" >"$wwtmp" 2>&1 &
+    if [ -s "$wwtmp1" ]; then
+      cat "$wwtmp1" >"$ww_a1" 2>/dev/null || : >"$ww_a1"
+      firstline="$(head -n 1 "$ww_a1" 2>/dev/null || true)"
     else
-      "${prefix[@]}" whatweb -a 1 "$base_url" >"$wwtmp" 2>&1 &
+      : >"$ww_a1"
+      firstline=""
     fi
-    pid=$!
+    rm -f -- "$wwtmp1" 2>/dev/null || true
 
-    # Watchdog: 45s TERM, then 5s KILL (best-effort)
-    (
-      sleep 45
-      if [ "$have_setsess" -eq 1 ]; then
-        kill -TERM -- "-$pid" 2>/dev/null || true
+    if [ "$rc1" -ne 0 ]; then
+      warn "$(tab 1)" "whatweb: exit=$rc1 (timeout/kill/error) probing $base_url (see $ww_a1)"
+    fi
+
+    # Conditional escalation: only if A1 suggests HTML-ish content
+    rc3=0
+    if whatweb_should_escalate "$firstline"; then
+      info "$(tab 2)" "${PURPLE}whatweb: ${CYAN}escalating to -a ${WW_ESCALATE_LEVEL}${BLUE}: ${base_url}${END}"
+
+      wwtmp3="$(mktemp /dev/shm/whatweb.a3.XXXXXX 2>/dev/null)" || wwtmp3=""
+      [ -n "$wwtmp3" ] || wwtmp3="$(mktemp "$outdir/whatweb.a3.tmp.XXXXXX" 2>/dev/null)" || wwtmp3="$outdir/whatweb.a3.tmp"
+
+      run_whatweb_timed "$wwtmp3" "$base_url" "$WW_ESCALATE_LEVEL" "$WW_A3_TIMEOUT" || rc3=$?
+
+      if [ -s "$wwtmp3" ]; then
+        cat "$wwtmp3" >"$ww_a3" 2>/dev/null || : >"$ww_a3"
       else
-        kill -TERM -- "$pid" 2>/dev/null || true
+        : >"$ww_a3"
       fi
-      sleep 5
-      if [ "$have_setsess" -eq 1 ]; then
-        kill -KILL -- "-$pid" 2>/dev/null || true
-      else
-        kill -KILL -- "$pid" 2>/dev/null || true
+      rm -f -- "$wwtmp3" 2>/dev/null || true
+
+      if [ "$rc3" -ne 0 ]; then
+        warn "$(tab 2)" "whatweb: exit=$rc3 (timeout/kill/error) probing $base_url at -a ${WW_ESCALATE_LEVEL} (see $ww_a3)"
       fi
-    ) &
-    wpid=$!
-
-    wait "$pid"
-    rc=$?
-
-    kill "$wpid" 2>/dev/null || true
-    wait "$wpid" 2>/dev/null || true
-
-    if [ -s "$wwtmp" ]; then
-      cat "$wwtmp" >"$wwout" 2>/dev/null || : >"$wwout"
     else
-      : >"$wwout"
+      : >"$ww_a3" 2>/dev/null || true
     fi
-    rm -f -- "$wwtmp" 2>/dev/null || true
 
-    if [ "$rc" -ne 0 ]; then
-      warn "$(tab 1)" "whatweb: exit=$rc (timeout/kill/error) probing $base_url (see $wwout)"
+    # Compose final whatweb.txt
+    : >"$wwout"
+    if [ -s "$ww_a1" ]; then
+      cat "$ww_a1" >>"$wwout" 2>/dev/null || true
+    fi
+    if [ -s "$ww_a3" ]; then
+      printf '\n' >>"$wwout"
+      cat "$ww_a3" >>"$wwout" 2>/dev/null || true
     fi
 
     printf '%s\t%s\t%s\t%s\t%s\n' \
@@ -281,6 +375,7 @@ EOF
     outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
+    base_url="${base_url//$'\r'/}"
 
     info "$(tab 1)" "${PURPLE}katana: ${BLUE}$base_url${END}"
 
@@ -309,6 +404,7 @@ EOF
     outdir="$(endpoint_dir "$port" "$host")"
     mkdir -p -- "$outdir"
     base_url="$(mk_base_url "$port" "$scheme" "$url" "$host")"
+    base_url="${base_url//$'\r'/}"
 
     if [ "$have_ffuf" -ne 1 ] || [ -z "$wl_paths" ]; then
       return 0
@@ -366,6 +462,9 @@ EOF
   if [ "$DO_VHOST" -eq 1 ]; then
     info "$(tab 1)" "${ORANGE}stage 0: ${CYAN}vhost fuzzing (one at a time)${END}"
     while IFS=$'\t' read -r port scheme url host atype ipport code; do
+      port="${port//$'\r'/}"; scheme="${scheme//$'\r'/}"; url="${url//$'\r'/}"
+      host="${host//$'\r'/}"; atype="${atype//$'\r'/}"; ipport="${ipport//$'\r'/}"; code="${code//$'\r'/}"
+
       [ -n "${port:-}" ]   || continue
       [ -n "${scheme:-}" ] || continue
       [ -n "${host:-}" ]   || continue
@@ -383,6 +482,9 @@ EOF
   else
     jobcount=0
     while IFS=$'\t' read -r port scheme url host atype ipport code; do
+      port="${port//$'\r'/}"; scheme="${scheme//$'\r'/}"; url="${url//$'\r'/}"
+      host="${host//$'\r'/}"; atype="${atype//$'\r'/}"; ipport="${ipport//$'\r'/}"; code="${code//$'\r'/}"
+
       [ -n "${port:-}" ]   || continue
       [ -n "${scheme:-}" ] || continue
       [ -n "${host:-}" ]   || continue
@@ -407,6 +509,9 @@ EOF
     warn "$(tab 1)" "http-master: katana not found; stage will be skipped."
   else
     while IFS=$'\t' read -r port scheme url host atype ipport code; do
+      port="${port//$'\r'/}"; scheme="${scheme//$'\r'/}"; url="${url//$'\r'/}"
+      host="${host//$'\r'/}"; atype="${atype//$'\r'/}"; ipport="${ipport//$'\r'/}"; code="${code//$'\r'/}"
+
       [ -n "${port:-}" ]   || continue
       [ -n "${scheme:-}" ] || continue
       [ -n "${host:-}" ]   || continue
@@ -423,6 +528,9 @@ EOF
     warn "$(tab 1)" "http-master: ffuf or paths wordlist missing; stage will be skipped."
   else
     while IFS=$'\t' read -r port scheme url host atype ipport code; do
+      port="${port//$'\r'/}"; scheme="${scheme//$'\r'/}"; url="${url//$'\r'/}"
+      host="${host//$'\r'/}"; atype="${atype//$'\r'/}"; ipport="${ipport//$'\r'/}"; code="${code//$'\r'/}"
+
       [ -n "${port:-}" ]   || continue
       [ -n "${scheme:-}" ] || continue
       [ -n "${host:-}" ]   || continue
